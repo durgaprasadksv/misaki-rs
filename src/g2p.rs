@@ -616,32 +616,20 @@ impl G2P {
         // misaki assigns punctuation its phonemes in `retokenize`, i.e. BEFORE
         // any lexicon lookup, and the resolution loop then skips those tokens
         // because `tk.phonemes is not None`. Order matters: our lookup
-        // normalises ‘ to a straight quote, which the lexicon then resolves to
-        // ” -- so reaching the lexicon at all gave ‘ the CLOSING quote where
-        // misaki gives the opening one.
+        // normalises ‘ to a straight quote, which the lexicon resolves to ”, so
+        // reaching the lexicon at all gave ‘ the CLOSING glyph.
         //
-        // The test is on the characters rather than the tag, as in
-        // `group_by_adjacency`; `_` is excluded because misaki merges it into
-        // the neighbouring word.
-        {
-            const STANDALONE: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}()[]{}*";
-            for i in 0..tokens.len() {
-                if tokens[i].phonemes.is_some() || tokens[i].text.is_empty() {
-                    continue;
-                }
-                let t = &tokens[i].text;
-                let is_quote = t.chars().all(|c| c == '\u{2018}' || c == '`');
-                let is_close = t.chars().all(|c| c == '\u{2019}' || c == '\'')
-                    && (!tokens[i].whitespace.is_empty() || i + 1 == tokens.len());
-                let is_dash = t.chars().count() >= 2
-                    && t.chars().all(|c| c == '-' || c == '\u{2013}');
-                if is_quote
-                    || is_close
-                    || is_dash
-                    || t.chars().all(|c| STANDALONE.contains(c))
-                {
-                    tokens[i].phonemes = Some(Self::punct_phonemes(t));
-                }
+        // The test is misaki's own, on the TAG. A character test was wrong in
+        // both directions: it gave `[` an opening paren where spaCy tags it XX
+        // rather than -LRB-, so misaki merges it into the following word and it
+        // contributes NOTHING -- `[Illustration` is ˌɪləstrˈAʃən, not
+        // `( ˌɪləstrˈAʃən`.
+        for i in 0..tokens.len() {
+            if tokens[i].phonemes.is_some() || tokens[i].text.is_empty() {
+                continue;
+            }
+            if Self::is_punct_token(&tokens[i]) {
+                tokens[i].phonemes = Some(Self::punct_phonemes(&tokens[i].text));
             }
         }
 
@@ -779,32 +767,18 @@ impl G2P {
                             // mapping spaCy's quote/paren tags: `` -> \u201c, '' -> \u201d,
                             // -LRB- -> (, -RRB- -> ).
                             //
-                            // misaki reaches that mapping through spaCy's tags. Our
-                            // tagger does not reproduce them for punctuation (it tags
-                            // \u201c as NNP and \u2019 as VBP), so the equivalent is derived from
-                            // the CHARACTER here, which for punctuation is
-                            // deterministic. The previous version kept only ';:,.!?'
-                            // and collapsed everything else to a space, which lost
-                            // every dash, ellipsis and quotation mark -- ~258 word-level
-                            // divergences in the prose corpus, the single largest
-                            // category.
-                            const PUNCTS: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}";
-                            let mapped: String = word
-                                .chars()
-                                .map(|c| match c {
-                                    // PUNCT_TAG_PHONEMES, by character
-                                    '\u{2018}' | '`' => '\u{201c}',
-                                    '\u{2019}' | '\'' => '\u{201d}',
-                                    '[' | '{' => '(',
-                                    ']' | '}' => ')',
-                                    other => other,
-                                })
-                                .filter(|c| PUNCTS.contains(*c) || matches!(c, '(' | ')'))
-                                .collect();
-                            // An empty result is correct and deliberate: misaki drops a
-                            // symbol that is in no class (`*`, `_`) to the empty string,
-                            // not to `unk`.
-                            tokens[i].phonemes = Some(mapped);
+                            // The punctuation pre-pass above already handled
+                            // every token misaki calls punctuation, by TAG. A
+                            // non-alphanumeric token that gets here is therefore
+                            // one spaCy did NOT tag as punctuation -- `[` is
+                            // tagged XX, not -LRB- -- and misaki leaves it
+                            // unresolved, so it contributes nothing when merged
+                            // into the following word. `[Illustration` is
+                            // ˌɪləstrˈAʃən, not `( ˌɪləstrˈAʃən`.
+                            //
+                            // SUBTOKEN_JUNKS still resolve to the empty string
+                            // (resolve_tokens), which the merge pass applies.
+                            tokens[i].phonemes = None;
                         }
                     }
                 }
@@ -890,23 +864,6 @@ impl G2P {
 
                     // misaki tries the whole word in the lexicon first and only
                     // falls back to stitching the parts together.
-                    // misaki derives stress from CAPITALISATION before the
-                    // lookup (`Lexicon.__call__`):
-                    //
-                    //     stress = None if word == word.lower() \
-                    //              else self.cap_stresses[int(word == word.upper())]
-                    //
-                    // Passing None here cost the leading stress on every
-                    // capitalised contraction: `It’s` resolved to ɪts where misaki
-                    // gives ˌɪts.
-                    let key = Self::normalize_lookup(&text);
-                    let merged_stress = if key == key.to_lowercase() {
-                        None
-                    } else if key == key.to_uppercase() {
-                        Some(self.lexicon.cap_stresses.1)
-                    } else {
-                        Some(self.lexicon.cap_stresses.0)
-                    };
                     // misaki's multi-token loop (`G2P.__call__`). It does not
                     // pick one span -- it resolves the word in PIECES, right to
                     // left, and the result is their concatenation:
@@ -1041,6 +998,7 @@ impl G2P {
                     }
                     // Anything still unresolved stays unresolved, as misaki
                     // leaves it: merge_tokens substitutes `unk` for None.
+                    // The stitched path below assembles whatever `res` holds.
                     let whole: Option<String> = None;
 
                     let phonemes = whole.or_else(|| {
