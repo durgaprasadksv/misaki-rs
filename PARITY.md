@@ -129,6 +129,16 @@ verified against `spacy.strings.hash_string` on ASCII and non-ASCII input
 That is ~30 lines of Rust. The per-layer `HashEmbed` then re-hashes with its own
 seed (8–13 for the six columns, `nV` = 5000/1000/2500/2500/50/50).
 
+The per-layer `HashEmbed` re-hash is **also closed**. It is not generic
+MurmurHash3 over bytes — Thinc hand-specialises it for a single `uint64`
+(`thinc/backends/numpy_ops.pyx`, `MurmurHash3_x86_128_uint64`), about 25 lines
+of 64-bit arithmetic producing four `uint32` keys, which are then taken `% nV`
+and summed with `gather_add`. Reimplemented and verified against
+`NumpyOps.hash` for all six layer seeds (8–13) across six input values
+including 0, 1 and 2^63 — every one matches. Generic `murmur3_x86_128` does
+**not** reproduce it, so an off-the-shelf crate is the wrong tool here; port the
+25 lines.
+
 What still needs care is reproducing spaCy's **NORM** exactly, since it applies
 a norm-exceptions table (`n't` → `not`) rather than plain lowercasing; PREFIX
 (first character), SUFFIX (last three) and SHAPE are mechanical. No ONNX
