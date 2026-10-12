@@ -6,9 +6,11 @@
 //! in this crate now matches; what remained were punctuation runs where spaCy's
 //! prefix/suffix peeling decides whether a mark is its own token:
 //!
+//! ```text
 //!     "17—."            one token        "17."           17 + .
 //!     "loathsome!--and"  one token        "else—but"      else + — + but
 //!     "can;—but"         one token        "five-storied"  five + - + storied
+//! ```
 //!
 //! The difference between the first two is a lookbehind in spaCy's suffix
 //! pattern: the `.` rule only fires after a character in a large class that

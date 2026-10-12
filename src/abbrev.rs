@@ -165,8 +165,10 @@ pub const PERIOD_ABBREVIATIONS: &[&str] = &[
 /// Two rules, both spaCy's:
 ///   * it appears in `PERIOD_ABBREVIATIONS` (an explicit tokenizer exception);
 ///   * it is a single uppercase letter followed by a period, i.e. an initial
+/// ```text
 ///     such as `K.` or `V.`. spaCy keeps these via a SUFFIX rule rather than
 ///     an exception, so they are absent from the list above.
+/// ```
 pub fn is_period_abbreviation(text: &str) -> bool {
     if PERIOD_ABBREVIATIONS.contains(&text) {
         return true;

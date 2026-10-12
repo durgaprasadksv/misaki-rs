@@ -1,14 +1,9 @@
-use misaki_rs::{Language, lexicon::Lexicon, spacy_tagger::Tagger, spacy_tokenizer::SpacyTokenizer};
+use misaki_rs::{G2P, Language};
 fn main() {
-    let lx = Lexicon::new(Language::EnglishUS);
-    println!("  rs lookup(ME,NNP)   = {:?}", lx.lookup("ME","NNP",None,None));
-    println!("  rs is_known(ME,NNP) = {}", lx.is_known("ME","NNP"));
-    let tk = SpacyTokenizer::new();
-    let tg = Tagger::load();
-    let text = "I\u{2019}m sure _I_ shan\u{2019}t be able!";
-    let toks = tk.tokenize(text);
-    let inp: Vec<(String,String,bool)> = toks.iter()
-        .map(|(t,ws)| (t.clone(), misaki_rs::norms::norm_of(t, misaki_rs::spacy_tagger::hash_string), !ws.is_empty()))
-        .collect();
-    println!("  rs tags: {:?}", toks.iter().map(|t| t.0.as_str()).zip(tg.tag(&inp)).collect::<Vec<_>>());
+    let mut g = G2P::new(Language::EnglishUS); g.unk = String::new();
+    for t in ["1-800-555-0199", "555-1234"] {
+        let (ps, toks) = g.g2p(t).unwrap();
+        println!("  {t:<16} [{ps}]");
+        for k in &toks { println!("      {:<16?} tag={:<5?} ph={:?}", k.text, k.tag, k.phonemes); }
+    }
 }

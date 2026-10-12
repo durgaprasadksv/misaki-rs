@@ -231,7 +231,9 @@ impl G2P {
 
     /// misaki's punctuation test (`retokenize`):
     ///
+    /// ```text
     ///     elif tk.tag in PUNCT_TAGS and not all(97 <= ord(c.lower()) <= 122 for c in tk.text):
+    /// ```
     ///
     /// with PUNCT_TAGS = {".", ",", "-LRB-", "-RRB-", "``", "\"\"", "''", ":",
     /// "$", "#", "NFP"}. Such a token gets its phonemes in `retokenize` and is
@@ -342,10 +344,12 @@ impl G2P {
     /// following token joins it while the group's last member still has no
     /// trailing whitespace.
     ///
+    /// ```text
     ///     elif words and isinstance(words[-1], list) and not words[-1][-1].whitespace:
     ///         tk._.is_head = False; words[-1].append(tk)
     ///     else:
     ///         words.append(tk if tk.whitespace else [tk])
+    /// ```
     ///
     /// This is what lets a finer tokenizer than spaCy's stay correct: `Mr` `.`
     /// and `It` `’` `s` and `five` `-` `storied` are each adjacent runs, so they
@@ -424,8 +428,10 @@ impl G2P {
     /// misaki's punctuation phonemes (`en.py:598-599`): the PUNCT_TAG_PHONEMES
     /// mapping, then keep only characters in PUNCTS.
     ///
+    /// ```text
     ///     tk.phonemes = PUNCT_TAG_PHONEMES.get(
     ///         tk.tag, ''.join(c for c in tk.text if c in PUNCTS))
+    /// ```
     ///
     /// with PUNCTS = ';:,.!?\u2014\u2026"\u201c\u201d' and `` -> \u201c, '' -> \u201d, -LRB- -> (,
     /// -RRB- -> ). An empty result is correct for a symbol in no class (`*`).
@@ -731,6 +737,19 @@ impl G2P {
             tk.tag = tag.clone();
         }
 
+        // `is_head` per subtoken. misaki sets `tk._.is_head = False` on any
+        // subtoken that JOINS an open group, and `get_number` branches on it:
+        // a three-digit group that is not the head reads as digit-then-pair
+        // rather than hundreds, so the 555 of a phone number is "five fifty
+        // five" and not "five hundred fifty five".
+        let head_groups = Self::group_by_adjacency(&tokens);
+        let mut is_head: Vec<bool> = vec![false; tokens.len()];
+        for g in &head_groups {
+            if g.start < is_head.len() {
+                is_head[g.start] = true;
+            }
+        }
+
         // misaki's currency state machine (`retokenize`):
         //
         //     elif tk.tag == '$' and tk.text in CURRENCIES:
@@ -861,37 +880,7 @@ impl G2P {
                         // Handle hyphenated words like "twenty-one"
                         let parts: Vec<&str> = word.split('-').filter(|s| !s.is_empty()).collect();
                         let mut sub_ps = Vec::new();
-                        for (pi, part) in parts.iter().enumerate() {
-                            // misaki reads a three-digit group that is NOT the
-                            // head of the number as digit-then-pair rather than
-                            // hundreds (`Lexicon.get_number`):
-                            //
-                            //     elif len(num) == 3 and not num.endswith('00'):
-                            //         extend_num(num[0])
-                            //         if num[1] == '0': ... 'O' ... else: extend_num(num[1:])
-                            //
-                            // so the 555 of a phone number is "five fifty five",
-                            // not "five hundred fifty five". The head keeps the
-                            // ordinary reading, which is why the 800 of
-                            // 1-800-555-0199 stays "eight hundred".
-                            let non_head_triple = pi > 0
-                                && part.len() == 3
-                                && part.chars().all(|c| c.is_ascii_digit())
-                                && !part.ends_with("00")
-                                && !part.starts_with('0');
-                            if non_head_triple {
-                                let first = &part[..1];
-                                let rest = &part[1..];
-                                let spoken = if rest.starts_with('0') {
-                                    format!("{} O {}", Self::spell(first), Self::spell(&rest[1..]))
-                                } else {
-                                    format!("{} {}", Self::spell(first), Self::spell(rest))
-                                };
-                                if let Some(p) = self.number_phonemes(&spoken) {
-                                    sub_ps.push(p);
-                                    continue;
-                                }
-                            }
+                        for part in parts {
                             let (p, _) = self.g2p(part)?;
                             sub_ps.push(p);
                         }
@@ -907,6 +896,16 @@ impl G2P {
                         // it. This is handled here as well as in the merge pass
                         // because spaCy puts the symbol in its own token, so a
                         // bare `$9` never forms a multi-token group at all.
+                        if let Some(p) = self.number_phonemes(&spoken) {
+                            tokens[i].phonemes = Some(p);
+                        } else if let Ok((p, _)) = self.g2p(&spoken) {
+                            tokens[i].phonemes = Some(p.trim_end().to_string());
+                        }
+                    } else if let Some(spoken) = (!is_head[i])
+                        .then(|| self.nonhead_number(&word))
+                        .flatten()
+                    {
+                        // A numeric group that is not the head of its word.
                         if let Some(p) = self.number_phonemes(&spoken) {
                             tokens[i].phonemes = Some(p);
                         } else if let Ok((p, _)) = self.g2p(&spoken) {
@@ -1493,14 +1492,17 @@ impl G2P {
     /// misaki's `get_number` does not phonemise the phrase as text -- it looks
     /// each word up on its own, and gives "point" a stress of -2:
     ///
+    /// ```text
     ///     result.append(self.lookup(w, None, -2 if w == 'point' else None, None))
+    /// ```
     ///
     /// Re-running the whole phrase through g2p instead left "point" stressed,
     /// so 3.5 came out θɹˈi pˈYnt fˈIv where misaki gives θɹˈi pYnt fˈIv.
     fn number_phonemes(&self, spoken: &str) -> Option<String> {
         let mut out: Vec<String> = Vec::new();
         for w in spoken.split_whitespace() {
-            let stress = if w == "point" { Some(-2.0) } else { None };
+            // misaki gives both "point" and the spoken-zero "O" a stress of -2.
+            let stress = if w == "point" || w == "O" { Some(-2.0) } else { None };
             let (ps, _) = self.lexicon.get_word(w, "NN", stress, None)?;
             out.push(ps);
         }
@@ -1520,6 +1522,47 @@ impl G2P {
             .and_then(|n| Num2Words::new(n).to_words().ok())
             .map(|w| Self::normalize_num_words(&w))
             .unwrap_or_else(|| digits.to_string())
+    }
+
+    /// misaki's non-head reading of a digit group (`Lexicon.get_number`):
+    ///
+    /// ```text
+    ///     elif not is_head and '.' not in word:
+    ///         if num[0] == '0' or len(num) > 3: digit by digit
+    ///         elif len(num) == 3 and not num.endswith('00'):
+    ///             num[0], then 'O' + num[2] if num[1]=='0' else num[1:]
+    ///         else: the whole as a cardinal
+    /// ```
+    ///
+    /// Returns None when the ordinary cardinal reading applies, including for
+    /// four digits -- those are caught earlier by the YEAR rule, which is why
+    /// 0199 reads "one ninety nine" and 1234 "twelve thirty four".
+    fn nonhead_number(&self, word: &str) -> Option<String> {
+        let num = word.replace(',', "");
+        if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        if num.len() == 4 {
+            return None; // the year rule owns this
+        }
+        if num.starts_with('0') || num.len() > 3 {
+            return Some(
+                num.chars()
+                    .map(|c| Self::spell(&c.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        if num.len() == 3 && !num.ends_with("00") {
+            let first = Self::spell(&num[..1]);
+            let rest = &num[1..];
+            return Some(if rest.starts_with('0') {
+                format!("{first} O {}", Self::spell(&rest[1..]))
+            } else {
+                format!("{first} {}", Self::spell(rest))
+            });
+        }
+        None
     }
 
     fn convert_number(&self, word: &str) -> String {
