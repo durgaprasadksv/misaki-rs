@@ -662,7 +662,7 @@ impl G2P {
                             sub_ps.push(p);
                         }
                         tokens[i].phonemes = Some(sub_ps.join(" "));
-                    } else if self.is_number(&word) {
+                    } else if self.is_number_like(&word) {
                         let spoken = self.convert_number(&word);
                         if spoken != word {
                             let (p, _) = self.g2p(&spoken)?;
@@ -893,6 +893,33 @@ impl G2P {
                     // "'s" HITS (us_gold holds "'s" as s), and Austen stays
                     // unresolved -- giving misaki's `s`. Trying only the whole
                     // word stitched on the letter name ˈɛs instead.
+                    // misaki's `Lexicon.__call__` tries get_word, then the
+                    // NUMBER path, before anything else:
+                    //
+                    //     ps, rating = self.get_word(...)
+                    //     if ps is not None: return ...
+                    //     elif Lexicon.is_number(word, tk._.is_head):
+                    //         ps, rating = self.get_number(...)
+                    //
+                    // Our tokenizer splits `1st` into `1` + `st`, so the group
+                    // text is the first point at which it looks like an ordinal
+                    // at all. Without this `1st` read as "one" and `23rd` as
+                    // "twenty three".
+                    if self.is_number_like(&text) {
+                        let spoken = self.convert_number(&text);
+                        if spoken != text {
+                            if let Ok((p, _)) = self.g2p(&spoken) {
+                                let mut tk = group[0].clone();
+                                tk.text = text;
+                                tk.tag = tag;
+                                tk.whitespace = ws;
+                                tk.phonemes = Some(p.trim_end().to_string());
+                                merged.push(tk);
+                                continue;
+                            }
+                        }
+                    }
+
                     let n = g.len();
                     let mut res: Vec<Option<String>> = vec![None; n];
                     let mut left = 0usize;
@@ -1064,6 +1091,24 @@ impl G2P {
             .collect::<String>();
 
         Ok((result, tokens))
+    }
+
+    /// Does this token go down misaki's number path?
+    ///
+    /// misaki's `Lexicon.is_number` peels an alphabetic suffix first, so `1st`,
+    /// `23rd` and `2nd` are numbers, not words. Testing only for all-digits
+    /// meant an ordinal never reached `get_number` and `1st` read as "one".
+    fn is_number_like(&self, word: &str) -> bool {
+        let clean = word.replace(',', "");
+        let lower = clean.to_lowercase();
+        for suf in ["st", "nd", "rd", "th"] {
+            if let Some(d) = lower.strip_suffix(suf) {
+                if !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()) {
+                    return true;
+                }
+            }
+        }
+        self.is_number(word)
     }
 
     fn is_number(&self, word: &str) -> bool {
