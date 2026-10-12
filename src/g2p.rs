@@ -7,6 +7,7 @@ use crate::lexicon::Lexicon;
 use thiserror::Error;
 use crate::tagger::PerceptronTagger;
 use crate::token::MToken;
+use fancy_regex::Regex as FancyRegex;
 use num2words::Num2Words;
 use regex::Regex;
 use std::collections::HashMap;
@@ -90,7 +91,7 @@ fn parse_link_feature(raw: &str) -> Option<LinkFeature> {
 pub struct G2P {
     pub lexicon: Lexicon,
     pub unk: String,
-    subtoken_regex: Regex,
+    subtoken_regex: FancyRegex,
     link_regex: Regex,
     /// The perceptron tagger this crate shipped with. No longer used for
     /// pronunciation -- `spacy_tagger` is, because misaki's output depends on
@@ -105,39 +106,41 @@ pub struct G2P {
 
 impl G2P {
     pub fn new(lang: Language) -> Self {
-        // misaki's SUBTOKEN_REGEX (`en.py:55`), alternative for alternative and
-        // in the same order, since regex alternation takes the first match:
+        // misaki's SUBTOKEN_REGEX (`en.py:55`), complete and in order, since
+        // regex alternation takes the first match:
         //
-        //   ^['‘’]+ | \p{Lu}(?=\p{Lu}\p{Ll}) | (?:^-)?(?:\d?[,.]?\d)+ | [-_]+
-        //   | ['‘’]{2,} | \p{L}*?(?:['‘’]\p{L})*?\p{Ll}(?=\p{Lu})
-        //   | \p{L}+(?:['‘’]\p{L})* | [^-_\p{L}'‘’\d] | ['‘’]+$
+        //   ^['‘’]+
+        //   | \p{Lu}(?=\p{Lu}\p{Ll})
+        //   | (?:^-)?(?:\d?[,.]?\d)+
+        //   | [-_]+
+        //   | ['‘’]{2,}
+        //   | \p{L}*?(?:['‘’]\p{L})*?\p{Ll}(?=\p{Lu})
+        //   | \p{L}+(?:['‘’]\p{L})*
+        //   | [^-_\p{L}'‘’\d]
+        //   | ['‘’]+$
         //
-        // Two bugs were in the character classes here. The word-internal
-        // apostrophe class read `[''']` -- three copies of the STRAIGHT
-        // apostrophe where misaki has straight plus both curly -- and the
-        // catch-all excluded only the straight one. So a curly ’ fell through
-        // to the catch-all and became its own token: `man’s` split into
-        // `man`,`’`,`s` while `man's` stayed whole. Every curly possessive and
-        // contraction in real prose came apart -- `man’s`, `Alice’s`,
-        // `hadn’t`, `won’t`, `Raskolnikov’s`.
+        // The two alternatives carrying lookahead are what split camel case,
+        // and they were missing: `iPhone` stayed whole, missed the lexicon and
+        // resolved to nothing, where misaki splits it `i` + `Phone` and gets
+        // ˈIfˌOn. fancy_regex supplies the lookahead the regex crate lacks.
         //
-        // The repeat is `\p{L}` and not `\p{L}+`, also as misaki has it; that is
-        // what makes `o’clock` subtokenize as `o’c` + `lock`.
-        //
-        // The two alternatives with lookahead (`\p{Lu}(?=\p{Lu}\p{Ll})` and the
-        // camel-case split) need `fancy_regex`; they are handled separately
-        // below so this stays on the fast `regex` engine.
-        let subtoken_regex = Regex::new(
-            r"(?x)
-            ^['‘’]+ |
-            (?:^-)?(?:\d?[,.]?\d)+ |
-            [\-_]+ |
-            ['‘’]{2,} |
-            \p{L}+(?:['‘’]\p{L})* |
-            [^\-_\p{L}'‘’\d] |
-            ['‘’]+$
-        ",
-        )
+        // Two bugs in the character classes are fixed here too. The
+        // word-internal apostrophe class held three copies of the STRAIGHT
+        // apostrophe where misaki has straight plus both curly, and the
+        // catch-all excluded only the straight one -- so a curly right
+        // apostrophe became its own token and every curly possessive and
+        // contraction in real prose came apart.
+        let subtoken_regex = FancyRegex::new(concat!(
+            r"^['‘’]+",
+            r"|\p{Lu}(?=\p{Lu}\p{Ll})",
+            r"|(?:^-)?(?:\d?[,.]?\d)+",
+            r"|[-_]+",
+            r"|['‘’]{2,}",
+            r"|\p{L}*?(?:['‘’]\p{L})*?\p{Ll}(?=\p{Lu})",
+            r"|\p{L}+(?:['‘’]\p{L})*",
+            r"|[^-_\p{L}'‘’\d]",
+            r"|['‘’]+$",
+        ))
         .unwrap();
 
         let weights_json = include_str!("resources/tagger/weights.json");
@@ -508,8 +511,8 @@ impl G2P {
         for mat in word_boundary_regex.find_iter(text) {
             let word = mat.as_str();
             let word_start = mat.start();
-            let subtokens: Vec<regex::Match> =
-                self.subtoken_regex.find_iter(word).collect();
+            let subtokens: Vec<fancy_regex::Match> =
+                self.subtoken_regex.find_iter(word).flatten().collect();
 
             if subtokens.is_empty() {
                 let tk = MToken::new(word.to_string(), "NN".to_string(), String::new());
@@ -641,6 +644,7 @@ impl G2P {
             let subs: Vec<String> = self
                 .subtoken_regex
                 .find_iter(stext)
+                .flatten()
                 .map(|m| m.as_str().to_string())
                 .collect();
             let subs = if subs.is_empty() { vec![stext.clone()] } else { subs };
