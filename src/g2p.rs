@@ -325,6 +325,18 @@ impl G2P {
         groups
     }
 
+    /// misaki's lookup-key normalisation (`Lexicon.__call__`): curly single
+    /// quotes become straight ones, then NFKC. The lexicons are keyed with
+    /// straight apostrophes.
+    ///
+    /// NFKC itself is not applied here -- it would need a unicode-normalisation
+    /// dependency, and the characters it folds that matter for English
+    /// (ligatures, full-width forms) do not appear in the corpora. The quote
+    /// substitution is the part that changes lookups.
+    fn normalize_lookup(text: &str) -> String {
+        text.replace('\u{2018}', "'").replace('\u{2019}', "'")
+    }
+
     /// Port of misaki's `G2P.token_context` (`en.py`).
     ///
     /// Decides what the token to the LEFT should assume about what follows it:
@@ -495,7 +507,17 @@ impl G2P {
 
         // Process in reverse to build context from future tokens
         for i in (0..tokens.len()).rev() {
-            let word = tokens[i].text.clone();
+            // misaki normalises the LOOKUP KEY before touching the lexicon
+            // (`Lexicon.__call__`):
+            //
+            //     word = tk.text.replace(chr(8216), "'").replace(chr(8217), "'")
+            //     word = unicodedata.normalize('NFKC', word)
+            //
+            // The lexicons are keyed with STRAIGHT apostrophes -- "it's" is in
+            // us_gold as ɪts, "I'm" as ˌIm, "'s" as s -- so prose using curly
+            // ’ missed every one of them and fell through to spelling the
+            // pieces out. The token's own text keeps the original character.
+            let word = Self::normalize_lookup(&tokens[i].text);
             let tag = tokens[i].tag.clone();
             // An explicit `[word](+N)` marker takes precedence over
             // capitalization-derived stress, matching Python misaki which
@@ -701,6 +723,23 @@ impl G2P {
                     let group = &tokens[g.clone()];
                     let (text, tag, ws) = Self::merge_text_tag(group);
 
+                    // misaki's `resolve_tokens`: a subtoken made entirely of
+                    // SUBTOKEN_JUNKS contributes NOTHING.
+                    //
+                    //     elif all(c in SUBTOKEN_JUNKS for c in tk.text):
+                    //         tk.phonemes = ''
+                    //
+                    // Without this the word-internal ’ in `it’s` kept the ”
+                    // that the standalone-quote path gives it, producing
+                    // ɪt”ˈɛs instead of ɪts.
+                    let part_of = |tk: &MToken| -> String {
+                        if !tk.text.is_empty() && tk.text.chars().all(|c| SUBTOKEN_JUNKS.contains(c)) {
+                            String::new()
+                        } else {
+                            tk.phonemes.clone().unwrap_or_default()
+                        }
+                    };
+
                     let classes: std::collections::BTreeSet<u8> = text
                         .chars()
                         .filter(|c| !SUBTOKEN_JUNKS.contains(*c))
@@ -713,13 +752,18 @@ impl G2P {
                     // falls back to stitching the parts together.
                     let whole = self
                         .lexicon
-                        .get_word(&text, &tag, None, Some(&contexts[g.start]))
+                        .get_word(
+                            &Self::normalize_lookup(&text),
+                            &tag,
+                            None,
+                            Some(&contexts[g.start]),
+                        )
                         .map(|(ps, _)| ps);
 
                     let phonemes = whole.or_else(|| {
                         let mut out = String::new();
                         for tk in group {
-                            let part = tk.phonemes.clone().unwrap_or_default();
+                            let part = part_of(tk);
                             if prespace
                                 && !out.is_empty()
                                 && !out.ends_with(char::is_whitespace)

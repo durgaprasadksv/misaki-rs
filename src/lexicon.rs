@@ -486,7 +486,19 @@ impl Lexicon {
             return self.lookup(add_symbols[word], "NN", Some(-0.5), ctx);
         } else if symbols.contains_key(word) {
             return self.lookup(symbols[word], "NN", None, ctx);
-        } else if word.contains('.') && word.replace('.', "").chars().all(|c| c.is_alphabetic()) {
+        } else if word.trim_matches('.').contains('.')
+            && word.replace('.', "").chars().all(|c| c.is_alphabetic())
+        {
+            // misaki requires the period to be INSIDE the word:
+            //
+            //     elif '.' in word.strip('.') and word.replace('.','').isalpha()
+            //          and len(max(word.split('.'), key=len)) < 3:
+            //
+            // so "U.S.A." and "a.m." are acronyms but "Mr." is not -- strip the
+            // trailing period and no period remains. Testing `word.contains('.')`
+            // instead sent every abbreviation down the spell-it-out path, which
+            // read "Mr." as ˌɛmˈɑɹ ("em-arr") rather than mˈɪstəɹ. 29 occurrences
+            // in the prose corpus, the single largest remaining divergence.
             let max_len = word.split('.').map(|s| s.len()).max().unwrap_or(0);
             if max_len < 3 {
                 return self.get_nnp(word);
