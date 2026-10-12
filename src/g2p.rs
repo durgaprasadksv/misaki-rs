@@ -803,6 +803,22 @@ impl G2P {
             if tokens[i].phonemes.is_some() || tokens[i].text.is_empty() {
                 continue;
             }
+            // misaki's dash branch comes BEFORE the general punctuation one
+            // (`retokenize`):
+            //
+            // ```text
+            //     elif tk.tag == ':' and tk.text in ('-', '–'):
+            //         tk.phonemes = '—'
+            // ```
+            //
+            // A hyphen or en dash that spaCy tagged ':' is spoken as an EM
+            // dash. The general path drops it instead, since '-' is not in
+            // PUNCTS -- so `laws-a-me` lost its dashes and `1-25—1469-94` ran
+            // its first two numbers together.
+            if tokens[i].tag == ":" && (tokens[i].text == "-" || tokens[i].text == "\u{2013}") {
+                tokens[i].phonemes = Some("\u{2014}".to_string());
+                continue;
+            }
             if Self::is_punct_token(&tokens[i]) {
                 let tg = tokens[i].tag.clone();
                 tokens[i].phonemes = Some(Self::punct_phonemes(&tokens[i].text, &tg));

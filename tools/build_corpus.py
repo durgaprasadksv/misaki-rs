@@ -108,6 +108,16 @@ BOOKS = [
     (11, r"\bCHAPTER\s+I\b", 150),     # Alice in Wonderland
 ]
 
+# Deliberately NOT used to develop against -- a held-out set, so the gate can
+# be checked for overfitting to the corpora above.
+HELDOUT = [
+    (1661, r"\bI\.\s", 200),           # Sherlock Holmes
+    (98, r"\bBook\s+the\s+First\b", 200),  # A Tale of Two Cities
+    (345, r"\bCHAPTER\s+I\b", 200),    # Dracula
+    (1232, r"\bCHAPTER\s+I\b", 150),   # The Prince
+    (74, r"\bCHAPTER\s+I\b", 150),     # Tom Sawyer
+]
+
 
 def fetch_prose(gid, marker, limit):
     url = "https://www.gutenberg.org/cache/epub/%d/pg%d.txt" % (gid, gid)
@@ -133,6 +143,14 @@ def main():
     lines = []
     if which in ("all", "adversarial"):
         lines += UPSTREAM + ADVERSARIAL
+    if which == "heldout":
+        for gid, marker, lim in HELDOUT:
+            try:
+                got = fetch_prose(gid, marker, lim)
+                sys.stderr.write("  gutenberg %-6d %d sentences\n" % (gid, len(got)))
+                lines += got
+            except Exception as e:
+                sys.stderr.write("  gutenberg %-6d FAILED: %s\n" % (gid, e))
     if which in ("all", "prose"):
         for gid, marker, lim in BOOKS:
             try:
