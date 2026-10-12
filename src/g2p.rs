@@ -93,6 +93,7 @@ pub struct G2P {
     subtoken_regex: Regex,
     link_regex: Regex,
     tagger: PerceptronTagger,
+    spacy_tagger: crate::spacy_tagger::Tagger,
     rules: Box<dyn LanguageRules>,
     fallback: Option<Box<dyn Fallback>>,
 }
@@ -143,6 +144,9 @@ impl G2P {
             subtoken_regex,
             link_regex,
             tagger: PerceptronTagger::new(weights_json, classes_txt, tags_json),
+            // The ported spaCy tagger. Kept alongside the perceptron rather
+            // than replacing it so the old one stays available for comparison.
+            spacy_tagger: crate::spacy_tagger::Tagger::load(),
             rules,
             fallback,
         }
@@ -492,10 +496,35 @@ impl G2P {
         let mut tokens: Vec<MToken> =
             tokens_with_spans.into_iter().map(|(tk, _)| tk).collect();
 
-        // Collect words for tagging
-        let words_owned: Vec<String> = tokens.iter().map(|tk| tk.text.clone()).collect();
-        let words: Vec<&str> = words_owned.iter().map(|s| s.as_str()).collect();
-        let tags = self.tagger.tag(&words);
+        // Tag at WORD level, as misaki does. spaCy tags its own tokens and
+        // misaki's subtokens inherit the parent's tag; our tokenizer splits
+        // finer than spaCy's, so tagging subtokens asks the model about
+        // fragments it never saw in training ("Mr" and "." separately rather
+        // than "Mr."). Group by adjacency first -- the same grouping that
+        // reassembles words later -- tag the group texts, and give every
+        // subtoken its group's tag.
+        //
+        // norm is the lowercased text. spaCy also applies a norm-exceptions
+        // table through its tokenizer ("n't" -> "not"), which only fires on
+        // pieces its own tokenizer produces; ours does not produce them, and
+        // the group text ("hadn't") is what gets tagged.
+        let groups_for_tagging = Self::group_by_adjacency(&tokens);
+        let tagger_input: Vec<(String, String, bool)> = groups_for_tagging
+            .iter()
+            .map(|g| {
+                let sub = &tokens[g.clone()];
+                let (t, _, ws) = Self::merge_text_tag(sub);
+                (t.clone(), t.to_lowercase(), !ws.is_empty())
+            })
+            .collect();
+        let group_tags = self.spacy_tagger.tag(&tagger_input);
+        let mut tags: Vec<String> = Vec::with_capacity(tokens.len());
+        for (gi, g) in groups_for_tagging.iter().enumerate() {
+            let tag = group_tags.get(gi).copied().unwrap_or("NN").to_string();
+            for _ in g.clone() {
+                tags.push(tag.clone());
+            }
+        }
 
         log::debug!(
             "g2p '{}' -> {} tokens, {} tags",
@@ -513,7 +542,7 @@ impl G2P {
 
         // First, set tags
         for (tk, tag) in tokens.iter_mut().zip(tags.iter()) {
-            tk.tag = tag.tag.clone();
+            tk.tag = tag.clone();
         }
 
         // Process in reverse to build context from future tokens
