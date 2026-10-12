@@ -259,7 +259,13 @@ impl G2P {
         // parens) stands alone. Deliberately NOT included are `-`, `’` and `_`,
         // which are SUBTOKEN_JUNKS -- they must keep merging, or `five-storied`
         // and `It’s` fall apart.
-        const STANDALONE: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}()[]{}_*";
+        // `_` is deliberately NOT here: it is a SUBTOKEN_JUNK and misaki merges
+        // it into the neighbouring word, giving `_like`, `that_`, `_It`, `for_`
+        // as single tokens. Treating it as standalone split those and shifted
+        // every following word timestamp while leaving the phoneme string
+        // identical -- 38 prose cases that agreed on what is said and disagreed
+        // on which word says it.
+        const STANDALONE: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}()[]{}*";
         let is_standalone = |tk: &MToken| -> bool {
             if tk.text.is_empty() {
                 return false;
@@ -271,11 +277,16 @@ impl G2P {
             if tk.text.len() >= 2 && tk.text.chars().all(|c| c == '-' || c == '\u{2013}') {
                 return true;
             }
-            // An apostrophe is part of the word only when something follows it
-            // inside the word (`man’s`, `It’s`). With trailing whitespace it is a
-            // closing quote, which spaCy tags '' and misaki renders as ” --
-            // hence `Thomas’ books` staying two tokens.
-            if tk.text.chars().all(|c| c == '\u{2019}' || c == '\'' || c == '\u{2018}')
+            // An OPENING single quote is always its own token -- spaCy tags ‘ as
+            // `` and misaki renders it “, so `‘_How` is two tokens, not one.
+            if tk.text.chars().all(|c| c == '\u{2018}' || c == '`') {
+                return true;
+            }
+            // A CLOSING apostrophe is part of the word only when the word
+            // continues past it (`man’s`, `It’s`). With trailing whitespace it is
+            // a closing quote, tagged '' and rendered ”, which is why
+            // `Thomas’ books` stays two tokens.
+            if tk.text.chars().all(|c| c == '\u{2019}' || c == '\'')
                 && !tk.whitespace.is_empty()
             {
                 return true;
