@@ -55,98 +55,113 @@ Fixtures are regenerated with `tools/gen_fixtures.py` against a venv holding
 misaki 0.9.4; `tools/build_corpus.py` assembles the corpora. No Python is
 needed to *run* the tests.
 
-## Progress
+## Status: exact
 
-| | adversarial (71) | prose (700) |
-|---|---|---|
-| as forked | 0% | 0% |
-| 0.9.4 lexicons, flap pass, real whitespace | 49.3% | 40.3% |
-| `token_context` ported | 52.1% | 41.0% |
-| OOV unresolved, PUNCTS ported | 53.5% | 57.1% |
-| number forms, adjacency merge, abbreviations | 62.0% | 63.9% |
-| apostrophe normalisation, acronym trigger | 60.6% | 74.7% |
-| stemmers keep case | 66.2% | 74.7% |
-| capitalisation stress, stress rebalancing | 64.8% | 81.1% |
-| prespace guard, ordinals | 67.6% | 81.1% |
-| underscore merges, opening quote stands alone | 67.6% | 83.9% |
-| multi-token span loop | 67.6% | 84.7% |
-| **ported spaCy tagger, word-level tagging** | 70.4% | 88.9% |
-| punctuation before lexicon, closing quotes | 70.4% | 90.0% |
-| `lookup` spells out non-NNP unknowns | 76.1% | 90.7% |
-| ordinals reach the number path | 77.5% | 90.9% |
-| currency, negative numbers | **78.9%** | **90.9%** |
+```
+adversarial    71/71   (100.0%)    tests/parity.rs
+real prose    700/700  (100.0%)    tests/parity.rs
+tagger      20623/20623 tokens, 771/771 sentences
+tokenizer   20623/20623 tokens, 771/771 sentences
+held-out      895/900  ( 99.4%)    tests/heldout.rs -- see below
+lib                24 tests
+```
 
-Prose phoneme strings alone match on 94.1%; the gate takes the lower of that and
-per-token attribution. The adversarial corpus is deliberately hostile
-(heteronyms, acronyms, dates, currency, stacked quotes) and is not
-representative of real text — report both, because an implementation can score
-well on prose while failing every heteronym, the error a listener notices most.
+Both committed corpora match misaki 0.9.4 **byte for byte**, on the phoneme
+string and on the per-token `(text, phonemes)` attribution that the word
+timestamps are derived from. The second half is not redundant: three separate
+bugs produced identical audio with the attribution shifted, and only the
+token-pair check saw them.
 
-Target is 100% on both.
+## How it was done
 
-## The POS tagger: done, exactly
+By differential testing, not by reading. misaki 0.9.4 has no test suite -- not
+in the pip package, not in `hexgrad/misaki`, and its one published
+expected-output string is stale (`examples/usage.py` documents `ə` for the
+article "a" where 0.9.4 emits `ɐ`). So misaki itself is the oracle:
+`tools/gen_fixtures.py` runs it over a corpus and freezes the output, and the
+tests assert against that with no Python at test time.
 
-`src/spacy_tagger.rs` ports `en_core_web_sm`'s tagger and reproduces it
-**exactly — 20,623/20,623 tokens, 771/771 sentences** (`tests/tagger_parity.rs`,
-which also checks the six feature columns separately so a mismatch can be
-attributed to the features or the network).
+Every fix below was found by that gate.
 
-This mattered because misaki's pronunciation is POS-conditional: 790 of the
-90,201 gold entries are tag-keyed and `get_special_case` branches on the tag
-directly (`A` as `DT` is `ɐ`, as `NNP` it is `ˈA`). The perceptron tagger it
-shipped with agreed on ~89% and accounted for 64 of the 73 wrong-phoneme tokens
-remaining at the time.
+### The two things that had to be ported, not approximated
 
-Four details cost real accuracy and none are visible in the architecture:
+Roughly half the work was discovering that misaki's behaviour is not
+self-contained: it tokenizes AND tags with spaCy, and its rule for grouping
+subtokens back into words reads the **tag of a spaCy token**. No character
+heuristic substitutes for that, which the gate proved repeatedly:
 
-* **Thinc's HashEmbed hash is not generic MurmurHash3.** It is hand-specialised
-  for a single `u64` (`numpy_ops.pyx`, `MurmurHash3_x86_128_uint64`), ~25 lines;
-  a stock murmur3 crate does not reproduce it.
-* **spaCy's StringStore does not hash every string.** It holds 457 symbols with
-  fixed small IDs — the shape `X` is 101 — so a one-character uppercase token's
-  SHAPE feature is 101, not its hash. `src/symbols.rs` carries the table. ~0.7%.
-* **`with_array(pad=4)`** wraps the encoder input in four zero rows per side,
-  then strips them. Not the same as zero-padding inside `expand_window`: the pad
-  rows pass through maxout and layernorm, so from the second block on a boundary
-  token's neighbour is the layernorm bias, not zero. Omitting it held agreement
-  at 99.0% and is why `Shhh!` tagged `NNP` instead of `UH`.
-* **`word_shape` tests `char.isalpha()` before case**, so a caseless alphabetic
-  character is `x` rather than itself (`ˈ` is alpha, neither upper nor lower);
-  and 100+ characters shape to the literal `LONG`.
-
-Each was found by bisecting the forward pass against spaCy's intermediate
-outputs, after a numpy reimplementation reproduced it exactly.
-
-## What is left
-
-Almost all of it is one root cause: **misaki groups subtokens into words by
-`tag in PUNCT_TAGS` on spaCy's OWN tokens, and we do not reproduce spaCy's
-tokenizer.** The grouping here approximates that with character tests, which is
-right most of the time and demonstrably not always:
-
-| | spaCy's tag | misaki | ours |
+| | spaCy's tag | misaki | a character rule |
 |---|---|---|---|
-| `_` in `_like` | `UH` | merges -> `_like` | merges ✓ |
-| `_` in `_it` | `NFP` | stands alone | merges ✗ |
-| `'` in `dogs'` | `POS` | merges -> `dogs'` | stands alone ✗ |
-| `’` in `Thomas’` | `''` | stands alone | stands alone ✓ |
+| `_` in `_like` | `UH` | merges | cannot tell |
+| `_` in `_it` | `NFP` | stands alone | these apart |
+| `'` in `dogs'` | `POS` | merges | cannot tell |
+| `’` in `Thomas’` | `''` | stands alone | these apart |
 
-Structurally identical inputs, different tags, different grouping. No character
-rule can separate them — the tag is the rule.
+So both halves of spaCy are ported and separately verified:
 
-The tagger is already exact, so the missing piece is **spaCy's tokenizer**:
-**1,347 tokenizer exceptions** plus 120 prefix / 83 suffix / 8 infix patterns
-and a URL matcher. All of it is data; the delicate part is the peeling algorithm
-that consults the exception table at each stage. `src/abbrev.rs` already carries
-the 146 `.`-terminated exceptions, which is the slice that mattered most.
+* **`src/spacy_tagger.rs`** — MultiHashEmbed + 4x residual MaxoutWindowEncoder +
+  softmax over 50 tags, 1,570,514 f32 in `data/tagger.bin`. Exact.
+* **`src/spacy_tokenizer.rs`** — `_split_affixes` / `_attach_tokens` over the
+  real prefix, suffix and infix patterns and 1,347 exceptions. Exact.
 
-Smaller, independent remainders:
+Four details in the tagger cost real accuracy and none are visible in the
+architecture:
 
-1. **The `2` -> `to` alias.** misaki rewrites a `2` between letters:
-   `elif 0 < j < len(tks)-1 and tk.text == '2' and (tks[j-1].text[-1]+tks[j+1].text[0]).isalpha()`,
-   so `G2P` is `ʤˈitəpˈi`. The alias also makes the token stand alone.
-2. **Times.** `5:30` and `3:42:15` keep their colons where misaki drops them.
-3. **Straight quotes by position.** A leading `'` is `“` and a trailing one `”`;
-   spaCy decides it by tag, and we render both as `”`.
-4. **Decimals in context** (`26.2`) and phone-number runs (`555-1234`).
-5. **`grow_dictionary`** remains absent; nothing in our pipeline calls it.
+* Thinc's HashEmbed hash is **not** generic MurmurHash3 — it is hand-specialised
+  for a single `u64`, ~25 lines; a stock crate does not reproduce it.
+* spaCy's StringStore does not hash every string: **457 symbols** have fixed
+  small IDs (the shape `X` is 101), worth ~0.7%.
+* **`with_array(pad=4)`** wraps the encoder in four zero rows per side. Not the
+  same as zero-padding inside `expand_window`, because the pad rows pass
+  through maxout and layernorm. Omitting it held agreement at 99.0%.
+* `word_shape` tests `isalpha()` **before** case, so a caseless letter is `x`.
+
+And NORM is not lowercasing: it comes from `BASE_NORMS`, the tokenizer
+exceptions and a 3,510-entry `lexeme_norm` table. The entry that matters most is
+the curly apostrophe normalising to the straight one — with the wrong NORM the
+tagger calls a possessive `''`, a PUNCT_TAG, and splits every `Alice’s` apart.
+
+### Bugs in the fork worth naming
+
+Several were not drift from a newer misaki but inventions or slips:
+
+* `whitespace` hardcoded to `" "`. The output is `''.join(phonemes +
+  whitespace)`, so **no** phoneme string could ever match.
+* The subtoken regex's word-internal apostrophe class held three copies of the
+  STRAIGHT apostrophe where misaki has straight plus both curly, so every curly
+  possessive in real prose came apart. Its two lookahead alternatives were also
+  missing, which is what splits camel case.
+* `future_vowel` guessed from spelling, and the guess **overwrote** the correct
+  value computed from phonemes, making the real context pass dead code.
+* The stemmers lowercased first, which breaks the all-caps acronym rule in
+  `is_known` — so every plural acronym resolved to silence.
+* `lookup` had an extra `if is_nnp` guard around `get_NNP`, so an unknown word
+  could only be spelled out when its tag was literally NNP.
+* `resolve_phonemes` treated an explicit `None` in a POS-keyed entry as "fall
+  back to DEFAULT" rather than "no pronunciation for this tag".
+* An out-of-vocabulary word was spelled out character by character. misaki
+  leaves it unresolved; spelling it made one token into six and corrupted every
+  downstream timestamp.
+
+## The one known gap
+
+`tests/heldout.rs` runs 900 sentences from five books never used while fixing
+anything. It exists because the committed fixtures were also the development
+target and therefore cannot measure overfitting — and on its first run it found
+8 divergences the 771 did not contain. Three are fixed; **895/900** remain
+exact, and the test asserts a regression floor so the number can only improve.
+
+The residue has a single cause. misaki derives its `TokenContext` from the
+phonemes of the merged WORD, because its resolution loop iterates over
+adjacency groups; ours iterates over subtokens, so a word whose merged phonemes
+differ from its parts' gives the wrong lookahead:
+
+```text
+    "I belong to Tellson’s Bank."
+      misaki  to -> tə      (merged `Tellson’s` is `s`, a consonant)
+      ours    to -> tʊ      (the `s` SUBTOKEN is the letter name ˈɛs, a vowel)
+```
+
+Closing it means resolving group by group in the reverse pass and updating the
+rolling context from each group's merged phonemes — misaki's own structure, and
+a restructure of `g2p` rather than another patch.
