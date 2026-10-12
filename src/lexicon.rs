@@ -685,9 +685,18 @@ impl Lexicon {
             return self.lookup(current_word, tag, stress, ctx);
         }
 
-        // Handle possessive forms
+        // Possessives. misaki tests the REWRITTEN form, not the stem:
+        //
+        //     elif word.endswith("s'") and self.is_known(word[:-2] + "'s", tag):
+        //         return self.lookup(word[:-2] + "'s", tag, stress, ctx)
+        //
+        // Testing is_known(word[:-2]) instead let the branch fire for `dogs'`
+        // -- "dog" is known -- and then lookup("dog's") spelled the word out,
+        // D-O-G-S. misaki finds "dog's" NOT known, returns None for the whole
+        // word, and lets the span loop resolve `dogs` + `'` separately, which
+        // gives dˈɔɡz and nothing.
         if current_word.ends_with("s'")
-            && self.is_known(&current_word[..current_word.len() - 2], tag)
+            && self.is_known(&format!("{}'s", &current_word[..current_word.len() - 2]), tag)
         {
             return self.lookup(
                 &format!("{}'s", &current_word[..current_word.len() - 2]),
@@ -709,7 +718,9 @@ impl Lexicon {
         if let Some(result) = self.stem_ed(current_word, tag, stress, ctx) {
             return Some(result);
         }
-        if let Some(result) = self.stem_ing(current_word, tag, Some(0.5).or(stress), ctx) {
+        // misaki: `0.5 if stress is None else stress`. `Some(0.5).or(stress)`
+        // is always Some(0.5) and discarded an explicit stress.
+        if let Some(result) = self.stem_ing(current_word, tag, stress.or(Some(0.5)), ctx) {
             return Some(result);
         }
 
