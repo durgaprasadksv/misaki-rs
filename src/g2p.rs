@@ -195,6 +195,46 @@ impl G2P {
         (stripped, markers)
     }
 
+    /// Port of misaki's `G2P.token_context` (`en.py`).
+    ///
+    /// Decides what the token to the LEFT should assume about what follows it:
+    /// whether the next sound is a vowel (`the` -> `\u00f0i` vs `\u00f0\u0259`, `a` -> `\u0250`), and
+    /// whether the next word is `to` (`to` -> `t\u028a` vs `t\u0259`). Both are decided
+    /// from the RESOLVED PHONEMES, never from spelling.
+    fn token_context(
+        ctx: &crate::lexicon::TokenContext,
+        ps: Option<&str>,
+        tk: &MToken,
+    ) -> crate::lexicon::TokenContext {
+        const VOWELS: &str = "AIOQWYaiu\u{e6}\u{251}\u{252}\u{254}\u{259}\u{25b}\u{25c}\u{26a}\u{28a}\u{28c}\u{1d7b}";
+        const CONSONANTS: &str = "bdfhjklmnpstvwz\u{f0}\u{14b}\u{261}\u{279}\u{27e}\u{283}\u{292}\u{2a4}\u{2a7}\u{3b8}";
+        const NON_QUOTE_PUNCTS: &str = "!,.:;?\u{2014}\u{2026}";
+
+        // `next(..., vowel)` in Python: if no character belongs to any of the
+        // three classes, the incoming value survives unchanged.
+        let mut future_vowel = ctx.future_vowel;
+        if let Some(ps) = ps {
+            for c in ps.chars() {
+                if NON_QUOTE_PUNCTS.contains(c) {
+                    future_vowel = None;
+                    break;
+                } else if VOWELS.contains(c) {
+                    future_vowel = Some(true);
+                    break;
+                } else if CONSONANTS.contains(c) {
+                    future_vowel = Some(false);
+                    break;
+                }
+            }
+        }
+
+        let future_to = tk.text == "to"
+            || tk.text == "To"
+            || (tk.text == "TO" && (tk.tag == "TO" || tk.tag == "IN"));
+
+        crate::lexicon::TokenContext { future_vowel, future_to }
+    }
+
     pub fn tokenize(&self, text: &str) -> Vec<MToken> {
         self.tokenize_with_offsets(text)
             .into_iter()
@@ -340,23 +380,13 @@ impl G2P {
                 }
             });
 
-            // Determine context from next token
-            if i < tokens.len() - 1 {
-                let next_word = &tokens[i + 1].text;
-                // Check if next word starts with vowel (simple heuristic)
-                if let Some(first_char) = next_word.chars().next() {
-                    let first_lower = first_char.to_lowercase().next().unwrap();
-                    if "aeiou".contains(first_lower) {
-                        contexts[i].future_vowel = Some(true);
-                    } else if first_char.is_alphabetic() {
-                        contexts[i].future_vowel = Some(false);
-                    }
-                }
-
-                if next_word.to_lowercase() == "to" {
-                    contexts[i].future_to = true;
-                }
-            }
+            // NOTE: `contexts[i]` was already filled by iteration i+1 from that
+            // token's RESOLVED PHONEMES -- see the `token_context` call at the
+            // end of this loop. There was an orthographic heuristic here
+            // ("does the next word start with aeiou") that overwrote it on
+            // every iteration, which is why `the FBI` came out `\u00f0\u0259` instead of
+            // `\u00f0i`: F is not in "aeiou", but FBI's phonemes begin `\u02cc\u025b`, a vowel.
+            // misaki decides this from phonemes, never from spelling.
 
             // Process current token
             if tokens[i].phonemes.is_none() {
@@ -410,13 +440,18 @@ impl G2P {
                         }
 
                         if !handled {
-                            // No fallback available or failed, try character-by-character
-                            let mut char_ps = Vec::new();
-                            for c in word.chars() {
-                                let (p, _) = self.g2p(&c.to_string())?;
-                                char_ps.push(p);
-                            }
-                            tokens[i].phonemes = Some(char_ps.join(" "));
+                            // Leave it unresolved. misaki returns (None, None) for an
+                            // out-of-vocabulary word (`Lexicon.__call__`); with no
+                            // fallback configured the phonemes stay None and the
+                            // assembled string substitutes `unk`.
+                            //
+                            // There was a character-by-character spell-out here. It is
+                            // not what misaki does and it was actively harmful: every
+                            // unknown proper noun became its spelling, so "Bennet" read
+                            // as "b-e-n-n-e-t" and one token became six, which is why
+                            // 257 of 413 failing prose cases differed in TOKEN COUNT
+                            // and therefore in every downstream word timestamp.
+                            let _ = &mut handled;
                         }
                     } else {
                         // Try to normalize the character or return unknown
@@ -439,48 +474,62 @@ impl G2P {
                             let (p, _) = self.g2p(&normalized)?;
                             tokens[i].phonemes = Some(p);
                         } else {
-                            // Handle standard punctuation and symbols gracefully
-                            if word.chars().count() == 1 {
-                                let c = word.chars().next().unwrap();
-                                if c.is_ascii_punctuation() || "—–…".contains(c) {
-                                    // Preserve the six punctuation marks Kokoro's vocab
-                                    // encodes explicitly (vocab ids 1-6: ';:,.!?').
-                                    // Downstream tokenizers map these to their own ids
-                                    // and the synthesis model uses them as prosody cues
-                                    // (sentence-end pause, clause breath, question
-                                    // intonation). Anything else (em-dash, ellipsis,
-                                    // parens, …) still collapses to a single space,
-                                    // matching the prior whitespace fallback.
-                                    if matches!(c, ';' | ':' | ',' | '.' | '!' | '?') {
-                                        tokens[i].phonemes = Some(c.to_string());
-                                    } else {
-                                        tokens[i].phonemes = Some(" ".to_string());
-                                    }
-                                } else {
-                                    tokens[i].phonemes = Some(self.unk.clone());
-                                }
-                            } else {
-                                tokens[i].phonemes = Some(self.unk.clone());
-                            }
+                            // Punctuation, as misaki resolves it (`en.py:598-599`):
+                            //
+                            //     elif tk.tag in PUNCT_TAGS and not all(97 <= ord(c.lower()) <= 122 ...):
+                            //         tk.phonemes = PUNCT_TAG_PHONEMES.get(
+                            //             tk.tag, ''.join(c for c in tk.text if c in PUNCTS))
+                            //
+                            // with PUNCTS = ';:,.!?\u2014\u2026"\u201c\u201d' and PUNCT_TAG_PHONEMES
+                            // mapping spaCy's quote/paren tags: `` -> \u201c, '' -> \u201d,
+                            // -LRB- -> (, -RRB- -> ).
+                            //
+                            // misaki reaches that mapping through spaCy's tags. Our
+                            // tagger does not reproduce them for punctuation (it tags
+                            // \u201c as NNP and \u2019 as VBP), so the equivalent is derived from
+                            // the CHARACTER here, which for punctuation is
+                            // deterministic. The previous version kept only ';:,.!?'
+                            // and collapsed everything else to a space, which lost
+                            // every dash, ellipsis and quotation mark -- ~258 word-level
+                            // divergences in the prose corpus, the single largest
+                            // category.
+                            const PUNCTS: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}";
+                            let mapped: String = word
+                                .chars()
+                                .map(|c| match c {
+                                    // PUNCT_TAG_PHONEMES, by character
+                                    '\u{2018}' | '`' => '\u{201c}',
+                                    '\u{2019}' | '\'' => '\u{201d}',
+                                    '[' | '{' => '(',
+                                    ']' | '}' => ')',
+                                    other => other,
+                                })
+                                .filter(|c| PUNCTS.contains(*c) || matches!(c, '(' | ')'))
+                                .collect();
+                            // An empty result is correct and deliberate: misaki drops a
+                            // symbol that is in no class (`*`, `_`) to the empty string,
+                            // not to `unk`.
+                            tokens[i].phonemes = Some(mapped);
                         }
                     }
                 }
             }
 
-            // Update context for previous tokens based on current phonemes
-            if i > 0 && tokens[i].phonemes.is_some() {
-                let vowels = "AIOQWYaiuæɑɒɔəɛɜɪʊʌᵻ";
-                let consonants = "bdfhjklmnpstvwzðŋɡɹɾʃʒʤʧθ";
-                let phonemes = tokens[i].phonemes.as_ref().unwrap();
-                for c in phonemes.chars() {
-                    if vowels.contains(c) {
-                        contexts[i - 1].future_vowel = Some(true);
-                        break;
-                    } else if consonants.contains(c) {
-                        contexts[i - 1].future_vowel = Some(false);
-                        break;
-                    }
-                }
+            // Propagate context leftwards, exactly as misaki's
+            // `G2P.token_context` does (`en.py`):
+            //
+            //     vowel = next((None if c in NON_QUOTE_PUNCTS else (c in VOWELS)
+            //                   for c in ps if any(c in s for s in
+            //                   (VOWELS, CONSONANTS, NON_QUOTE_PUNCTS))), vowel) if ps else vowel
+            //
+            // Three things the previous version got wrong and this one does not:
+            // punctuation RESETS future_vowel to None rather than being skipped;
+            // a token whose phonemes contain no vowel, consonant or punctuation
+            // CARRIES THE PREVIOUS value rather than leaving a stale one; and
+            // future_to is set here from the token, not guessed from spelling.
+            if i > 0 {
+                contexts[i - 1] =
+                    Self::token_context(&contexts[i], tokens[i].phonemes.as_deref(), &tokens[i]);
             }
         }
 
