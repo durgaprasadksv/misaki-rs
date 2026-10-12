@@ -1062,7 +1062,7 @@ impl G2P {
                             tk.text = text;
                             tk.tag = tag;
                             tk.whitespace = ws;
-                            tk.phonemes = Some(p.trim_end().to_string());
+                            tk.phonemes = Some(p);
                             merged.push(tk);
                             continue;
                         }
@@ -1102,8 +1102,13 @@ impl G2P {
                             } else {
                                 Some(self.lexicon.cap_stresses.0)
                             };
+                            // the context at the SPAN's own left edge, not the
+                            // group's: misaki carries a rolling ctx through its
+                            // loop, so the inner `the` of `out-of-the-way` sees
+                            // what follows IT (`way`, a consonant -> ðə) and not
+                            // what follows the whole word.
                             self.lexicon
-                                .get_word(&k, &tg, st, Some(&contexts[g.start]))
+                                .get_word(&k, &tg, st, Some(&contexts[g.start + left]))
                                 .map(|(ps, _)| ps)
                         } else {
                             None
