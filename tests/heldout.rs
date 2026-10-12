@@ -5,26 +5,22 @@
 //! from five books never used while fixing anything -- can, and on first run it
 //! found 8 divergences the committed fixtures did not contain.
 //!
-//! It asserts a REGRESSION FLOOR rather than exactness, because a known gap
-//! remains. The floor exists so the number can only move one way; it is not a
-//! target, and the comment below says what has to change to retire it.
+//! It now asserts EXACTNESS, like the committed corpora. It did not at first:
+//! the initial run found 8 divergences the fixtures did not contain, which is
+//! the whole reason it exists. All eight are fixed.
 //!
-//! ## The remaining gap
+//! The last two were the subtlest bugs in the port, and neither could have been
+//! found on the development corpora:
 //!
-//! misaki derives its `TokenContext` from the phonemes of the merged WORD,
-//! because its resolution loop iterates over adjacency groups. Ours iterates
-//! over subtokens, so a word whose merged phonemes differ from its parts' gives
-//! the wrong lookahead:
-//!
-//! ```text
-//!     "I belong to Tellson’s Bank."
-//!       misaki  to -> tə      (merged `Tellson’s` is `s`, a consonant)
-//!       ours    to -> tʊ      (the `s` SUBTOKEN is the letter name ˈɛs, a vowel)
-//! ```
-//!
-//! Closing it means resolving group by group in the reverse pass and updating
-//! the rolling context from each group's merged phonemes -- misaki's own
-//! structure, and a restructure of `g2p` rather than another patch.
+//!   * spaCy runs `_apply_special_cases` AFTER affix splitting, re-joining a
+//!     run of tokens whose text spells a special case. Peeling takes `'nuff!"`
+//!     apart correctly at every step, and only that later pass reunites the
+//!     quote with the word.
+//!   * a tokenizer rule's NORM must travel with the RULE. `you'd` gives its
+//!     second piece the norm `'d` while `you'd've` gives the same orth `would`,
+//!     so no table keyed on the orth alone can be right -- and with the wrong
+//!     norm the tagger called that piece an MD where spaCy says '', which
+//!     decides whether the word stays joined.
 use misaki_rs::{G2P, Language};
 use serde::Deserialize;
 
@@ -39,11 +35,8 @@ struct Golden {
     cases: Vec<Case>,
 }
 
-/// Raise this as the gap closes; never lower it.
-const FLOOR: usize = 895;
-
 #[test]
-fn heldout_regression_floor() {
+fn heldout_matches_misaki() {
     let raw = std::fs::read_to_string("tests/fixtures/golden_heldout_us.json").unwrap();
     let g: Golden = serde_json::from_str(&raw).unwrap();
     let mut e = G2P::new(Language::EnglishUS);
@@ -63,11 +56,10 @@ fn heldout_regression_floor() {
         }
     }
     println!(
-        "\nheld-out: {}/{} exact ({:.1}%), floor {}",
+        "\nheld-out: {}/{} exact ({:.1}%)",
         ok,
         g.cases.len(),
-        100.0 * ok as f64 / g.cases.len() as f64,
-        FLOOR
+        100.0 * ok as f64 / g.cases.len() as f64
     );
-    assert!(ok >= FLOOR, "held-out parity regressed below {FLOOR}: {ok}");
+    assert_eq!(ok, g.cases.len(), "held-out parity is not exact");
 }

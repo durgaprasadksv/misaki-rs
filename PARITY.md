@@ -60,15 +60,15 @@ needed to *run* the tests.
 ```
 adversarial    71/71   (100.0%)    tests/parity.rs
 real prose    700/700  (100.0%)    tests/parity.rs
+held-out      900/900  (100.0%)    tests/heldout.rs
 tagger      20623/20623 tokens, 771/771 sentences
 tokenizer   20623/20623 tokens, 771/771 sentences
-held-out      895/900  ( 99.4%)    tests/heldout.rs -- see below
-lib                24 tests
+lib                24 tests        doctests 0 failures
 ```
 
-Both committed corpora match misaki 0.9.4 **byte for byte**, on the phoneme
-string and on the per-token `(text, phonemes)` attribution that the word
-timestamps are derived from. The second half is not redundant: three separate
+All three corpora match misaki 0.9.4 **byte for byte**, on the phoneme string
+and on the per-token `(text, phonemes)` attribution that the word timestamps
+are derived from. The second half is not redundant: three separate
 bugs produced identical audio with the attribution shifted, and only the
 token-pair check saw them.
 
@@ -143,25 +143,33 @@ Several were not drift from a newer misaki but inventions or slips:
   leaves it unresolved; spelling it made one token into six and corrupted every
   downstream timestamp.
 
-## The one known gap
+## The held-out corpus, and why it exists
 
 `tests/heldout.rs` runs 900 sentences from five books never used while fixing
-anything. It exists because the committed fixtures were also the development
-target and therefore cannot measure overfitting — and on its first run it found
-8 divergences the 771 did not contain. Three are fixed; **895/900** remain
-exact, and the test asserts a regression floor so the number can only improve.
+anything (Sherlock Holmes, A Tale of Two Cities, Dracula, The Prince, Tom
+Sawyer). The committed fixtures were also the development target, so they
+cannot measure overfitting — and on its first run this corpus found **8
+divergences the 771 did not contain**. All eight are fixed, and it now asserts
+exactness like the others.
 
-The residue has a single cause. misaki derives its `TokenContext` from the
-phonemes of the merged WORD, because its resolution loop iterates over
-adjacency groups; ours iterates over subtokens, so a word whose merged phonemes
-differ from its parts' gives the wrong lookahead:
+The last two were the subtlest bugs in the port, and neither was reachable from
+the development corpora:
 
-```text
-    "I belong to Tellson’s Bank."
-      misaki  to -> tə      (merged `Tellson’s` is `s`, a consonant)
-      ours    to -> tʊ      (the `s` SUBTOKEN is the letter name ˈɛs, a vowel)
-```
+* **spaCy runs `_apply_special_cases` AFTER affix splitting**
+  (`Tokenizer.__call__`: `_tokenize_affixes`, then `_apply_special_cases`). It
+  re-joins a run of tokens whose text spells a special case. Peeling takes
+  `’nuff!”` apart correctly at every step — prefix `’`, suffix `”`, suffix `!`
+  — and only that later pass reunites the quote with the word. spaCy needs it
+  for exactly the same reason, and without it `’nuff` arrived as two tokens.
 
-Closing it means resolving group by group in the reverse pass and updating the
-rolling context from each group's merged phonemes — misaki's own structure, and
-a restructure of `g2p` rather than another patch.
+* **A tokenizer rule's NORM must travel with the RULE.** `rule["you’d"]` gives
+  its second piece the norm `'d`, while `rule["you’d’ve"]` gives the same orth
+  `would`. A table keyed on the orth alone has to pick one, and picking wrong
+  made the tagger call that piece `MD` where spaCy says `''` — which, since
+  `''` is a PUNCT_TAG, decides whether the word stays joined. The tokenizer
+  knows which rule fired, so it now carries each token's norm and the tables
+  are only a fallback.
+
+That second one is the general lesson of this port: misaki's output depends on
+spaCy in more places than its source suggests, and the cheap approximation of
+any of them is wrong on text you did not test against.

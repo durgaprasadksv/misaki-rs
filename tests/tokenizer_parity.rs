@@ -26,19 +26,22 @@ fn tokenizer_matches_spacy() {
     for c in &g.cases {
         let got = tk.tokenize(&c.text);
         let ok = got.len() == c.tokens.len()
-            && got.iter().zip(&c.tokens).all(|(a, b)| a.0 == b.0 && a.1 == b.1);
+            && got
+                .iter()
+                .zip(&c.tokens)
+                .all(|(a, b)| a.text == b.0 && a.whitespace == b.1);
         if ok {
             sent_ok += 1;
         } else if shown < 10 {
             shown += 1;
             println!("  {:?}", c.text.chars().take(64).collect::<String>());
             println!("    spacy {:?}", c.tokens.iter().map(|t| t.0.as_str()).collect::<Vec<_>>());
-            println!("    rs    {:?}", got.iter().map(|t| t.0.as_str()).collect::<Vec<_>>());
+            println!("    rs    {:?}", got.iter().map(|t| t.text.as_str()).collect::<Vec<_>>());
         }
         let n = got.len().max(c.tokens.len());
         for i in 0..n {
             tok_tot += 1;
-            if got.get(i).map(|t| (&t.0, &t.1)) == c.tokens.get(i).map(|t| (&t.0, &t.1)) {
+            if got.get(i).map(|t| (&t.text, &t.whitespace)) == c.tokens.get(i).map(|t| (&t.0, &t.1)) {
                 tok_ok += 1;
             }
         }

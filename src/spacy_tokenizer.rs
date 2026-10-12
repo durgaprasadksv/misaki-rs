@@ -28,12 +28,21 @@ use fancy_regex::Regex;
 
 use crate::spacy_tokenizer_data as data;
 
+/// One spaCy token: its text, the whitespace that follows it, and the NORM the
+/// tokenizer rule gave it, if any.
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub text: String,
+    pub whitespace: String,
+    pub norm: Option<String>,
+}
+
 pub struct SpacyTokenizer {
     prefix: Regex,
     suffix: Regex,
     infix: Regex,
     url: Option<Regex>,
-    specials: HashMap<&'static str, &'static [&'static str]>,
+    specials: HashMap<&'static str, &'static [(&'static str, Option<&'static str>)]>,
 }
 
 impl Default for SpacyTokenizer {
@@ -145,8 +154,8 @@ impl SpacyTokenizer {
         }
         if !mid.is_empty() {
             if let Some(pieces) = self.specials.get(mid) {
-                for p in *pieces {
-                    out.push((*p).to_string());
+                for (o, _) in *pieces {
+                    out.push((*o).to_string());
                 }
             } else if self.is_url(mid) {
                 out.push(mid.to_string());
@@ -185,11 +194,80 @@ impl SpacyTokenizer {
         }
     }
 
+    /// `Tokenizer._apply_special_cases`, which spaCy runs AFTER the affix
+    /// splitting (`Tokenizer.__call__`: `_tokenize_affixes` then
+    /// `_apply_special_cases`). It re-joins a run of tokens whose text spells a
+    /// special case and replaces it with that rule's pieces.
+    ///
+    /// Without it, peeling takes `’nuff!”` apart as `’` + `nuff` + `!` + `”` --
+    /// each step is correct, and the quote is only reunited with the word by
+    /// this later pass, which spaCy needs for exactly the same reason.
+    ///
+    /// Returns each token's norm when the rule that produced it sets one. That
+    /// norm must travel with the RULE: `you’d` gives its second piece the norm
+    /// `'d` while `you’d’ve` gives the same orth `would`, so no table keyed on
+    /// the orth alone can be right.
+    fn apply_special_cases(&self, toks: Vec<(String, String)>) -> Vec<Token> {
+        const MAX_RUN: usize = 6;
+        let mut out: Vec<Token> = Vec::with_capacity(toks.len());
+        let mut i = 0usize;
+        while i < toks.len() {
+            let mut hit: Option<(usize, &'static [(&'static str, Option<&'static str>)])> = None;
+            // Longest run first, and only across tokens nothing separates.
+            let limit = MAX_RUN.min(toks.len() - i);
+            for len in (1..=limit).rev() {
+                if len > 1
+                    && toks[i..i + len - 1]
+                        .iter()
+                        .any(|(_, ws)| !ws.is_empty())
+                {
+                    continue;
+                }
+                let joined: String = toks[i..i + len].iter().map(|(t, _)| t.as_str()).collect();
+                if let Some(pieces) = self.specials.get(joined.as_str()) {
+                    hit = Some((len, pieces));
+                    break;
+                }
+            }
+            match hit {
+                Some((len, pieces)) if len > 1 || pieces.len() > 1 => {
+                    let tail_ws = toks[i + len - 1].1.clone();
+                    let last = pieces.len() - 1;
+                    for (k, (o, nm)) in pieces.iter().enumerate() {
+                        out.push(Token {
+                            text: (*o).to_string(),
+                            whitespace: if k == last { tail_ws.clone() } else { String::new() },
+                            norm: nm.map(|x| x.to_string()),
+                        });
+                    }
+                    i += len;
+                }
+                _ => {
+                    // A single token that is its own one-piece rule still takes
+                    // that rule's norm.
+                    let norm = self
+                        .specials
+                        .get(toks[i].0.as_str())
+                        .filter(|p| p.len() == 1)
+                        .and_then(|p| p[0].1)
+                        .map(|x| x.to_string());
+                    out.push(Token {
+                        text: toks[i].0.clone(),
+                        whitespace: toks[i].1.clone(),
+                        norm,
+                    });
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
     /// Tokenize one whitespace-delimited chunk.
     fn tokenize_chunk(&self, chunk: &str, out: &mut Vec<String>) {
         if let Some(pieces) = self.specials.get(chunk) {
-            for p in *pieces {
-                out.push((*p).to_string());
+            for (o, _) in *pieces {
+                out.push((*o).to_string());
             }
             return;
         }
@@ -199,9 +277,15 @@ impl SpacyTokenizer {
         self.attach_tokens(mid, &prefixes, &suffixes, out);
     }
 
-    /// Tokenize `text`, returning `(token, trailing whitespace)` pairs, the
-    /// same shape spaCy's `token.text` / `token.whitespace_` give misaki.
-    pub fn tokenize(&self, text: &str) -> Vec<(String, String)> {
+    /// Tokenize `text` the way spaCy does: affix splitting, then
+    /// `_apply_special_cases`.
+    pub fn tokenize(&self, text: &str) -> Vec<Token> {
+        let raw = self.tokenize_affixes(text);
+        self.apply_special_cases(raw)
+    }
+
+    /// Affix splitting only (`Tokenizer._tokenize_affixes`).
+    fn tokenize_affixes(&self, text: &str) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = Vec::new();
         let mut i = 0usize;
         let bytes = text.as_bytes();

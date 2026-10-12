@@ -258,53 +258,6 @@ impl G2P {
         })
     }
 
-    /// Subtoken runs that spaCy would have produced as single tokens.
-    ///
-    /// Only the period matters: our subtokenizer always splits it, while spaCy
-    /// keeps its 146 known abbreviations whole (`Mr.`, `a.m.`, and single
-    /// initials like `K.`). Everything else our tokenizer already agrees on.
-    fn group_for_tagging(tokens: &[MToken]) -> Vec<std::ops::Range<usize>> {
-        let mut out: Vec<std::ops::Range<usize>> = Vec::new();
-        let mut i = 0usize;
-        while i < tokens.len() {
-            let mut end = i + 1;
-            // `Mr` + `.` -> `Mr.`, but only while the pieces are adjacent.
-            if i + 1 < tokens.len()
-                && tokens[i].whitespace.is_empty()
-                && tokens[i + 1].text == "."
-            {
-                let cand = format!("{}.", tokens[i].text);
-                if crate::abbrev::is_period_abbreviation(&cand) {
-                    end = i + 2;
-                }
-            }
-            // `’` + `s` -> `’s`. spaCy emits that as one token and tags it POS,
-            // which is not a PUNCT_TAG, so misaki merges it into the word.
-            // Tagging a lone `’` instead yields `''` and splits `Lydia’s` apart.
-            if end == i + 1 && tokens[i].text.chars().count() == 1 {
-                let c = tokens[i].text.chars().next().unwrap();
-                if matches!(c, '\'' | '\u{2018}' | '\u{2019}') {
-                    let mut cand = tokens[i].text.clone();
-                    let mut j = i;
-                    while j + 1 < tokens.len() && tokens[j].whitespace.is_empty() {
-                        cand.push_str(&tokens[j + 1].text);
-                        j += 1;
-                        if crate::abbrev::is_contraction_piece(&cand) {
-                            end = j + 1;
-                            break;
-                        }
-                        if cand.chars().count() > 6 {
-                            break;
-                        }
-                    }
-                }
-            }
-            out.push(i..end);
-            i = end;
-        }
-        out
-    }
-
     /// Port of misaki's module-level `merge_tokens` (`en.py`).
     ///
     /// Collapses a run of adjacent subtokens into the single word misaki would
@@ -625,8 +578,18 @@ impl G2P {
         let spacy_tokens = self.spacy_tokenizer.tokenize(&processed_text);
         let tagger_input: Vec<(String, String, bool)> = spacy_tokens
             .iter()
-            .map(|(t, ws)| {
-                let norm = crate::norms::norm_of(t, crate::spacy_tagger::hash_string);
+            .map(|tok| {
+                let (t, ws) = (&tok.text, &tok.whitespace);
+                // The NORM the tokenizer RULE supplied wins. It has to: `you’d`
+                // gives its second piece the norm `'d` while `you’d’ve` gives
+                // the same orth `would`, so no table keyed on the orth alone is
+                // right, and with the wrong norm the tagger called that piece
+                // an MD where spaCy says '' -- which decides whether the word
+                // stays joined.
+                let norm = tok
+                    .norm
+                    .clone()
+                    .unwrap_or_else(|| crate::norms::norm_of(t, crate::spacy_tagger::hash_string));
                 (t.clone(), norm, !ws.is_empty())
             })
             .collect();
@@ -645,7 +608,8 @@ impl G2P {
         let mut rebuilt: Vec<MToken> = Vec::with_capacity(tokens.len());
         let mut tags: Vec<String> = Vec::new();
         let mut pos = 0usize;
-        for (si, (stext, sws)) in spacy_tokens.iter().enumerate() {
+        for (si, st) in spacy_tokens.iter().enumerate() {
+            let (stext, sws) = (&st.text, &st.whitespace);
             let tag = group_tags.get(si).copied().unwrap_or("NN").to_string();
             let subs: Vec<String> = self
                 .subtoken_regex
@@ -1342,6 +1306,70 @@ impl G2P {
                     merged.push(tk);
                 }
                 tokens = merged;
+            }
+        }
+
+        // ---- contexts from the MERGED words, then re-resolve ----
+        //
+        // misaki's resolution loop iterates over adjacency GROUPS, so the
+        // lookahead context it carries leftward comes from the phonemes of a
+        // whole word. Ours resolves subtokens first and merges afterwards, so
+        // the context came from a SUBTOKEN, and a word whose merged phonemes
+        // differ from its parts' gave the wrong answer:
+        //
+        // ```text
+        //     "I belong to Tellson’s Bank."
+        //       misaki  to -> tə    (merged `Tellson’s` is `s`, a consonant)
+        //       ours    to -> tʊ    (the `s` SUBTOKEN is the letter name ˈɛs)
+        // ```
+        //
+        // Rather than restructure the loop, the contexts are recomputed here
+        // over the finished word list -- which is exactly what misaki's loop
+        // sees -- and the words whose pronunciation depends on that context are
+        // resolved again against it.
+        //
+        // The re-resolution is deliberately narrow. It touches a token only
+        // when it is a plain alphabetic word with no alias, already resolved by
+        // the lexicon, and `get_word` under the new context returns something
+        // else. Numbers, currency, punctuation, aliases and out-of-vocabulary
+        // words are left exactly as they were.
+        {
+            let n = tokens.len();
+            let mut ctxs = vec![crate::lexicon::TokenContext::default(); n];
+            let mut rolling = crate::lexicon::TokenContext::default();
+            for i in (0..n).rev() {
+                ctxs[i] = rolling.clone();
+                rolling =
+                    Self::token_context(&rolling, tokens[i].phonemes.as_deref(), &tokens[i]);
+            }
+            for i in 0..n {
+                if tokens[i].underscore().alias.is_some() {
+                    continue;
+                }
+                let text = tokens[i].text.clone();
+                if text.is_empty() || !text.chars().all(|c| c.is_alphabetic()) {
+                    continue;
+                }
+                match tokens[i].phonemes.as_deref() {
+                    Some(p) if !p.is_empty() => {}
+                    _ => continue,
+                }
+                let key = Self::normalize_lookup(&text);
+                let stress = tokens[i].underscore().stress.or_else(|| {
+                    if key == key.to_lowercase() {
+                        None
+                    } else if key == key.to_uppercase() {
+                        Some(self.lexicon.cap_stresses.1)
+                    } else {
+                        Some(self.lexicon.cap_stresses.0)
+                    }
+                });
+                let tag = tokens[i].tag.clone();
+                if let Some((ps, _)) =
+                    self.lexicon.get_word(&key, &tag, stress, Some(&ctxs[i]))
+                {
+                    tokens[i].phonemes = Some(ps);
+                }
             }
         }
 
