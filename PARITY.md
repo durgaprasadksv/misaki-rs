@@ -115,10 +115,24 @@ Softmax          96 -> 50 tags
 ```
 
 **1,565,664 parameters, 6.3 MB fp32** — smaller than the lexicons already
-vendored here. Every operation is elementary (hash lookup, affine, maxout as a
-reshape-and-max, layernorm, residual, window concat); the only fidelity risk is
-reproducing Thinc's MurmurHash seeding exactly. No ONNX runtime is required,
-though a Kokoro service already carries one.
+vendored here. Every operation is elementary: hash lookup, affine, maxout as a
+reshape-and-max, layernorm, residual, window concat.
+
+The one fidelity risk was the hashing, and it is **closed**. The six feature
+columns are `NORM, PREFIX, SUFFIX, SHAPE, SPACY, IS_SPACE`, and the first four
+arrive as spaCy StringStore hashes, which are
+
+> **MurmurHash64A over the UTF-8 bytes with seed 1**
+
+verified against `spacy.strings.hash_string` on ASCII and non-ASCII input
+(`a`, `dog`, `barked`, `.`, `xxx`, `X`, `Hello, world!`, `naïve` — all match).
+That is ~30 lines of Rust. The per-layer `HashEmbed` then re-hashes with its own
+seed (8–13 for the six columns, `nV` = 5000/1000/2500/2500/50/50).
+
+What still needs care is reproducing spaCy's **NORM** exactly, since it applies
+a norm-exceptions table (`n't` → `not`) rather than plain lowercasing; PREFIX
+(first character), SUFFIX (last three) and SHAPE are mechanical. No ONNX
+runtime is required, though a Kokoro service already carries one.
 
 Projected: fixing the tagger should convert most of those 64, giving roughly
 94%. The remaining ~6% is the 77 cases where tokenization still disagrees plus
