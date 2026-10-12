@@ -60,102 +60,93 @@ needed to *run* the tests.
 | | adversarial (71) | prose (700) |
 |---|---|---|
 | as forked | 0% | 0% |
-| + 0.9.4 lexicons, flap pass, real whitespace | 49.3% | 40.3% |
-| + `token_context` ported | 52.1% | 41.0% |
-| + OOV unresolved, PUNCTS ported | 53.5% | 57.1% |
-| + number forms, adjacency merge, abbreviations | 62.0% | 63.9% |
-| + apostrophe normalisation, acronym trigger | 60.6% | 74.7% |
-| + stemmers keep case | 66.2% | 74.7% |
-| + capitalisation stress, stress rebalancing | 64.8% | 81.1% |
-| + prespace guard, ordinals | 67.6% | 81.1% |
-| + underscore merges, opening quote stands alone | 67.6% | 83.9% |
-| + multi-token span loop | **67.6%** | **84.7%** |
+| 0.9.4 lexicons, flap pass, real whitespace | 49.3% | 40.3% |
+| `token_context` ported | 52.1% | 41.0% |
+| OOV unresolved, PUNCTS ported | 53.5% | 57.1% |
+| number forms, adjacency merge, abbreviations | 62.0% | 63.9% |
+| apostrophe normalisation, acronym trigger | 60.6% | 74.7% |
+| stemmers keep case | 66.2% | 74.7% |
+| capitalisation stress, stress rebalancing | 64.8% | 81.1% |
+| prespace guard, ordinals | 67.6% | 81.1% |
+| underscore merges, opening quote stands alone | 67.6% | 83.9% |
+| multi-token span loop | 67.6% | 84.7% |
+| **ported spaCy tagger, word-level tagging** | 70.4% | 88.9% |
+| punctuation before lexicon, closing quotes | 70.4% | 90.0% |
+| `lookup` spells out non-NNP unknowns | 76.1% | 90.7% |
+| ordinals reach the number path | 77.5% | 90.9% |
+| currency, negative numbers | **78.9%** | **90.9%** |
 
-Phoneme strings alone match on 87.7% of prose; the gate is the lower of that
-and per-token attribution, because `pred_dur` is per token.
+Prose phoneme strings alone match on 94.1%; the gate takes the lower of that and
+per-token attribution. The adversarial corpus is deliberately hostile
+(heteronyms, acronyms, dates, currency, stacked quotes) and is not
+representative of real text — report both, because an implementation can score
+well on prose while failing every heteronym, the error a listener notices most.
 
 Target is 100% on both.
 
-## What is left, measured rather than guessed
+## The POS tagger: done, exactly
 
-On the 623 prose cases where **tokenization already agrees**:
+`src/spacy_tagger.rs` ports `en_core_web_sm`'s tagger and reproduces it
+**exactly — 20,623/20,623 tokens, 771/771 sentences** (`tests/tagger_parity.rs`,
+which also checks the six feature columns separately so a mismatch can be
+attributed to the features or the network).
 
-| | |
-|---|---|
-| phonemes match | 593 |
-| fail, and the POS tag also differs | **64** |
-| fail with every tag correct | **9** |
+This mattered because misaki's pronunciation is POS-conditional: 790 of the
+90,201 gold entries are tag-keyed and `get_special_case` branches on the tag
+directly (`A` as `DT` is `ɐ`, as `NNP` it is `ˈA`). The perceptron tagger it
+shipped with agreed on ~89% and accounted for 64 of the 73 wrong-phoneme tokens
+remaining at the time.
 
-So the ported logic is essentially right, and the dominant remaining cause is
-the **POS tagger**. Its agreement with spaCy is **89-90%**, and the
-disagreements that change pronunciation are exactly the ones misaki keys on:
+Four details cost real accuracy and none are visible in the architecture:
 
-| spaCy -> ours | n | effect |
-|---|---|---|
-| `DT` -> `NNP` on *A* | 8 | `ɐ` vs `ˈA` -- `get_special_case` branches on `tag == 'DT'` |
-| `DT`/`IN` confusion on *that* | 21 | `ðˈæt` vs `ðæt` (a POS-conditional lexicon entry) |
-| `RB`/`RP` -> `IN` on *in* | 6 | stress |
-| `VBD` -> `NN` on *dove*, *read* | — | the heteronyms |
+* **Thinc's HashEmbed hash is not generic MurmurHash3.** It is hand-specialised
+  for a single `u64` (`numpy_ops.pyx`, `MurmurHash3_x86_128_uint64`), ~25 lines;
+  a stock murmur3 crate does not reproduce it.
+* **spaCy's StringStore does not hash every string.** It holds 457 symbols with
+  fixed small IDs — the shape `X` is 101 — so a one-character uppercase token's
+  SHAPE feature is 101, not its hash. `src/symbols.rs` carries the table. ~0.7%.
+* **`with_array(pad=4)`** wraps the encoder input in four zero rows per side,
+  then strips them. Not the same as zero-padding inside `expand_window`: the pad
+  rows pass through maxout and layernorm, so from the second block on a boundary
+  token's neighbour is the layernorm bias, not zero. Omitting it held agreement
+  at 99.0% and is why `Shhh!` tagged `NNP` instead of `UH`.
+* **`word_shape` tests `char.isalpha()` before case**, so a caseless alphabetic
+  character is `x` rather than itself (`ˈ` is alpha, neither upper nor lower);
+  and 100+ characters shape to the literal `LONG`.
 
-### Reaching 100% means shipping spaCy's tagger
+Each was found by bisecting the forward pass against spaCy's intermediate
+outputs, after a numpy reimplementation reproduced it exactly.
 
-misaki's pronunciation is POS-conditional (790 of 90,201 gold entries are
-tag-keyed, plus the `get_special_case` branches), so exact parity requires
-exactly spaCy's tags. The embedded `PerceptronTagger` cannot get there; it is a
-different model class.
+## What is left
 
-`en_core_web_sm`'s tagger is small and fully specified, which makes this
-bounded work rather than open-ended:
+Almost all of it is one root cause: **misaki groups subtokens into words by
+`tag in PUNCT_TAGS` on spaCy's OWN tokens, and we do not reproduce spaCy's
+tokenizer.** The grouping here approximates that with character tests, which is
+right most of the time and demonstrably not always:
 
-```
-MultiHashEmbed   6 hash embeddings (NORM/PREFIX/SUFFIX/SHAPE/...) -> 576
-                 -> maxout -> layernorm -> 96
-MaxoutWindowEncoder  4x residual(expand_window(3) -> maxout -> layernorm)
-Softmax          96 -> 50 tags
-```
+| | spaCy's tag | misaki | ours |
+|---|---|---|---|
+| `_` in `_like` | `UH` | merges -> `_like` | merges ✓ |
+| `_` in `_it` | `NFP` | stands alone | merges ✗ |
+| `'` in `dogs'` | `POS` | merges -> `dogs'` | stands alone ✗ |
+| `’` in `Thomas’` | `''` | stands alone | stands alone ✓ |
 
-**1,565,664 parameters, 6.3 MB fp32** — smaller than the lexicons already
-vendored here. Every operation is elementary: hash lookup, affine, maxout as a
-reshape-and-max, layernorm, residual, window concat.
+Structurally identical inputs, different tags, different grouping. No character
+rule can separate them — the tag is the rule.
 
-The one fidelity risk was the hashing, and it is **closed**. The six feature
-columns are `NORM, PREFIX, SUFFIX, SHAPE, SPACY, IS_SPACE`, and the first four
-arrive as spaCy StringStore hashes, which are
+The tagger is already exact, so the missing piece is **spaCy's tokenizer**:
+**1,347 tokenizer exceptions** plus 120 prefix / 83 suffix / 8 infix patterns
+and a URL matcher. All of it is data; the delicate part is the peeling algorithm
+that consults the exception table at each stage. `src/abbrev.rs` already carries
+the 146 `.`-terminated exceptions, which is the slice that mattered most.
 
-> **MurmurHash64A over the UTF-8 bytes with seed 1**
+Smaller, independent remainders:
 
-verified against `spacy.strings.hash_string` on ASCII and non-ASCII input
-(`a`, `dog`, `barked`, `.`, `xxx`, `X`, `Hello, world!`, `naïve` — all match).
-That is ~30 lines of Rust. The per-layer `HashEmbed` then re-hashes with its own
-seed (8–13 for the six columns, `nV` = 5000/1000/2500/2500/50/50).
-
-The per-layer `HashEmbed` re-hash is **also closed**. It is not generic
-MurmurHash3 over bytes — Thinc hand-specialises it for a single `uint64`
-(`thinc/backends/numpy_ops.pyx`, `MurmurHash3_x86_128_uint64`), about 25 lines
-of 64-bit arithmetic producing four `uint32` keys, which are then taken `% nV`
-and summed with `gather_add`. Reimplemented and verified against
-`NumpyOps.hash` for all six layer seeds (8–13) across six input values
-including 0, 1 and 2^63 — every one matches. Generic `murmur3_x86_128` does
-**not** reproduce it, so an off-the-shelf crate is the wrong tool here; port the
-25 lines.
-
-What still needs care is reproducing spaCy's **NORM** exactly, since it applies
-a norm-exceptions table (`n't` → `not`) rather than plain lowercasing; PREFIX
-(first character), SUFFIX (last three) and SHAPE are mechanical. No ONNX
-runtime is required, though a Kokoro service already carries one.
-
-Projected: fixing the tagger should convert most of those 64, giving roughly
-94%. The remaining ~6% is the 77 cases where tokenization still disagrees plus
-the 9 residual logic failures — both visible to the gate and chaseable the same
-way everything above was.
-
-## Known remaining gaps, in order
-
-1. **POS tagger** — 64 of 73 wrong-phoneme tokens. See above.
-2. **Tokenization** — 77 of 700 prose cases still differ in token count.
-   Remaining shapes are rarer: bracketed citations, stacked quotes, `17—.`
-3. **Currency** — `append_currency` is unwired, so `$9` gives `nˈIn` and not
-   `nˈIn dˈɑləɹz`. `is_currency`/`numeric_if_needed` are absent.
-4. **Negative numbers** — misaki renders `-40` as the empty string; we read it
-   as "forty".
-5. **`grow_dictionary`** — absent; nothing in our pipeline calls it.
+1. **The `2` -> `to` alias.** misaki rewrites a `2` between letters:
+   `elif 0 < j < len(tks)-1 and tk.text == '2' and (tks[j-1].text[-1]+tks[j+1].text[0]).isalpha()`,
+   so `G2P` is `ʤˈitəpˈi`. The alias also makes the token stand alone.
+2. **Times.** `5:30` and `3:42:15` keep their colons where misaki drops them.
+3. **Straight quotes by position.** A leading `'` is `“` and a trailing one `”`;
+   spaCy decides it by tag, and we render both as `”`.
+4. **Decimals in context** (`26.2`) and phone-number runs (`555-1234`).
+5. **`grow_dictionary`** remains absent; nothing in our pipeline calls it.
