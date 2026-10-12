@@ -177,3 +177,63 @@ pub fn is_period_abbreviation(text: &str) -> bool {
         _ => false,
     }
 }
+
+/// Apostrophe-initial pieces spaCy's tokenizer emits as single tokens, from
+/// `nlp.tokenizer.rules` (the multi-character subset; the bare `'` and `’` need
+/// no merging because our tokenizer already emits them alone).
+///
+/// This matters for GROUPING, not pronunciation. spaCy tokenizes `Lydia’s` as
+/// `Lydia` + `’s` and tags that piece POS, which is not a PUNCT_TAG, so misaki
+/// merges it back into one word. Our subtokenizer emits `Lydia`, `’`, `s`; left
+/// alone, the tagger sees a lone `’`, calls it `''`, and the word splits.
+pub const CONTRACTION_PIECES: &[&str] = &[
+    "''",
+    "'Cause",
+    "'Cos",
+    "'Coz",
+    "'Cuz",
+    "'S",
+    "'bout",
+    "'cause",
+    "'cos",
+    "'coz",
+    "'cuz",
+    "'d",
+    "'em",
+    "'ll",
+    "'m",
+    "'nuff",
+    "'re",
+    "'s",
+    "'ve",
+    "'y",
+    "n't",
+    "n’t",
+    "‘S",
+    "‘s",
+    "’Cause",
+    "’Cos",
+    "’Coz",
+    "’Cuz",
+    "’S",
+    "’bout",
+    "’cause",
+    "’cos",
+    "’coz",
+    "’cuz",
+    "’d",
+    "’em",
+    "’ll",
+    "’m",
+    "’nuff",
+    "’re",
+    "’s",
+    "’ve",
+    "’y",
+    "’’",
+];
+
+/// Is `text` one of spaCy's apostrophe-initial tokenizer pieces?
+pub fn is_contraction_piece(text: &str) -> bool {
+    CONTRACTION_PIECES.contains(&text)
+}

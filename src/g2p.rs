@@ -199,6 +199,80 @@ impl G2P {
         (stripped, markers)
     }
 
+    /// misaki's punctuation test (`retokenize`):
+    ///
+    ///     elif tk.tag in PUNCT_TAGS and not all(97 <= ord(c.lower()) <= 122 for c in tk.text):
+    ///
+    /// with PUNCT_TAGS = {".", ",", "-LRB-", "-RRB-", "``", "\"\"", "''", ":",
+    /// "$", "#", "NFP"}. Such a token gets its phonemes in `retokenize` and is
+    /// therefore appended STANDALONE, never merged into a neighbouring word.
+    ///
+    /// This is the rule, and no character test substitutes for it: spaCy tags
+    /// the `_` in `_like` as UH and the one in `_it` as NFP, so misaki merges
+    /// the first and not the second from structurally identical input. Likewise
+    /// `dogs'` has tag POS and merges, while `Thomas’` has `''` and does not.
+    fn is_punct_token(tk: &MToken) -> bool {
+        const PUNCT_TAGS: [&str; 11] = [
+            ".", ",", "-LRB-", "-RRB-", "``", "\"\"", "''", ":", "$", "#", "NFP",
+        ];
+        if !PUNCT_TAGS.contains(&tk.tag.as_str()) {
+            return false;
+        }
+        // ... and not entirely a-z, so a word that happens to carry a
+        // punctuation tag is still a word.
+        !tk.text.chars().all(|c| {
+            let l = c.to_lowercase().next().unwrap_or(c);
+            ('a'..='z').contains(&l)
+        })
+    }
+
+    /// Subtoken runs that spaCy would have produced as single tokens.
+    ///
+    /// Only the period matters: our subtokenizer always splits it, while spaCy
+    /// keeps its 146 known abbreviations whole (`Mr.`, `a.m.`, and single
+    /// initials like `K.`). Everything else our tokenizer already agrees on.
+    fn group_for_tagging(tokens: &[MToken]) -> Vec<std::ops::Range<usize>> {
+        let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut i = 0usize;
+        while i < tokens.len() {
+            let mut end = i + 1;
+            // `Mr` + `.` -> `Mr.`, but only while the pieces are adjacent.
+            if i + 1 < tokens.len()
+                && tokens[i].whitespace.is_empty()
+                && tokens[i + 1].text == "."
+            {
+                let cand = format!("{}.", tokens[i].text);
+                if crate::abbrev::is_period_abbreviation(&cand) {
+                    end = i + 2;
+                }
+            }
+            // `’` + `s` -> `’s`. spaCy emits that as one token and tags it POS,
+            // which is not a PUNCT_TAG, so misaki merges it into the word.
+            // Tagging a lone `’` instead yields `''` and splits `Lydia’s` apart.
+            if end == i + 1 && tokens[i].text.chars().count() == 1 {
+                let c = tokens[i].text.chars().next().unwrap();
+                if matches!(c, '\'' | '\u{2018}' | '\u{2019}') {
+                    let mut cand = tokens[i].text.clone();
+                    let mut j = i;
+                    while j + 1 < tokens.len() && tokens[j].whitespace.is_empty() {
+                        cand.push_str(&tokens[j + 1].text);
+                        j += 1;
+                        if crate::abbrev::is_contraction_piece(&cand) {
+                            end = j + 1;
+                            break;
+                        }
+                        if cand.chars().count() > 6 {
+                            break;
+                        }
+                    }
+                }
+            }
+            out.push(i..end);
+            i = end;
+        }
+        out
+    }
+
     /// Port of misaki's module-level `merge_tokens` (`en.py`).
     ///
     /// Collapses a run of adjacent subtokens into the single word misaki would
@@ -253,52 +327,11 @@ impl G2P {
         //     if tk._.alias is not None or tk.phonemes is not None:
         //         words.append(tk)
         //
-        // and `retokenize` has already assigned phonemes to punctuation by then
-        // (`tk.tag in PUNCT_TAGS` -> PUNCT_TAG_PHONEMES). So a punctuation mark
-        // is always its own word and never merges, which is why `barked` and
-        // `.` stay two tokens even though nothing separates them.
-        //
-        // Our tagger does not reproduce spaCy's punctuation tags, so the test
-        // is on the characters: a token made only of PUNCTS members (or
-        // parens) stands alone. Deliberately NOT included are `-`, `’` and `_`,
-        // which are SUBTOKEN_JUNKS -- they must keep merging, or `five-storied`
-        // and `It’s` fall apart.
-        // `_` is deliberately NOT here: it is a SUBTOKEN_JUNK and misaki merges
-        // it into the neighbouring word, giving `_like`, `that_`, `_It`, `for_`
-        // as single tokens. Treating it as standalone split those and shifted
-        // every following word timestamp while leaving the phoneme string
-        // identical -- 38 prose cases that agreed on what is said and disagreed
-        // on which word says it.
-        const STANDALONE: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}()[]{}*";
-        let is_standalone = |tk: &MToken, is_last: bool| -> bool {
-            if tk.text.is_empty() {
-                return false;
-            }
-            // A run of two or more hyphens is a dash, not a joiner: spaCy makes
-            // `him--the` three tokens and tags `--` as ':', which lands in
-            // PUNCT_TAGS. A SINGLE hyphen is tagged HYPH and must keep merging,
-            // or `five-storied` falls apart.
-            if tk.text.len() >= 2 && tk.text.chars().all(|c| c == '-' || c == '\u{2013}') {
-                return true;
-            }
-            // An OPENING single quote is always its own token -- spaCy tags ‘ as
-            // `` and misaki renders it “, so `‘_How` is two tokens, not one.
-            if tk.text.chars().all(|c| c == '\u{2018}' || c == '`') {
-                return true;
-            }
-            // A CLOSING apostrophe is part of the word only when the word
-            // continues past it (`man’s`, `It’s`). Otherwise it is a closing
-            // quote, tagged '' and rendered ”, which is why `Thomas’ books` and
-            // `… little’` both stay two tokens. The `is_last` case matters:
-            // at the end of the input there is no trailing whitespace, and
-            // testing whitespace alone merged it into the previous word.
-            if tk.text.chars().all(|c| c == '\u{2019}' || c == '\'')
-                && (!tk.whitespace.is_empty() || is_last)
-            {
-                return true;
-            }
-            tk.text.chars().all(|c| STANDALONE.contains(c))
-        };
+        // and `retokenize` has already given punctuation its phonemes by then,
+        // so a punctuation mark is always its own word. `is_punct_token` is
+        // misaki's own test, on the TAG; the character approximation that used
+        // to be here could not tell `_like` from `_it`.
+        let is_standalone = |tk: &MToken, _is_last: bool| -> bool { Self::is_punct_token(tk) };
 
         let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
         let mut open = false; // is the last group still extensible?
@@ -532,20 +565,24 @@ impl G2P {
         // table through its tokenizer ("n't" -> "not"), which only fires on
         // pieces its own tokenizer produces; ours does not produce them, and
         // the group text ("hadn't") is what gets tagged.
-        let groups_for_tagging = Self::group_by_adjacency(&tokens);
+        // The tagger input must be spaCy's TOKENS, because misaki's grouping
+        // rule is `tk.tag in PUNCT_TAGS` on those tokens -- and whether `_`
+        // merges into its neighbour is decided by nothing else. spaCy tags the
+        // `_` in `_like` as UH (misaki merges it) and the one in `_it` as NFP
+        // (misaki does not), from structurally identical input.
+        //
+        // Our subtokens already agree with spaCy wherever it matters: `_`, `'`
+        // and `’` come out separate, `It's` and `hadn't` come out whole, and
+        // `five`/`-`/`storied` matches. The one systematic difference is the
+        // period: we always split it, spaCy keeps its known abbreviations
+        // together. So merge exactly those runs and tag the result.
+        let groups_for_tagging = Self::group_for_tagging(&tokens);
         let tagger_input: Vec<(String, String, bool)> = groups_for_tagging
             .iter()
             .map(|g| {
                 let sub = &tokens[g.clone()];
                 let (t, _, ws) = Self::merge_text_tag(sub);
-                // spaCy tokenizes `_` as its own NFP token, so it tags the WORD
-                // inside: `_I_` is `_`,`I`,`_` and `merge_tokens` then takes the
-                // heaviest member's tag, PRP. Our group is the whole `_I_`, so
-                // strip the emphasis underscores before tagging or the model
-                // sees a token it never met and answers NNP.
-                let probe = t.trim_matches('_');
-                let probe = if probe.is_empty() { t.as_str() } else { probe };
-                (probe.to_string(), probe.to_lowercase(), !ws.is_empty())
+                (t.clone(), t.to_lowercase(), !ws.is_empty())
             })
             .collect();
         let group_tags = self.spacy_tagger.tag(&tagger_input);
