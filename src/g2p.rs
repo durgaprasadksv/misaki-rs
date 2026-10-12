@@ -618,12 +618,16 @@ impl G2P {
         // subtoken inherits the parent's tag; only the last carries the
         // parent's trailing whitespace (`tks[-1].whitespace = token.whitespace`).
         //
-        // Link markers were applied to the old subtoken list, so anything they
-        // set is carried across by matching text; a marker that lands on a
-        // token this rebuild splits differently keeps the head override.
-        let marked: Vec<MToken> = tokens.clone();
-        let mut rebuilt: Vec<MToken> = Vec::with_capacity(marked.len());
+        // Link markers are applied here, by BYTE SPAN against the
+        // preprocessed text. Carrying them across by matching token text was
+        // fragile and lost `[hello](-1)`: the same word appears more than once
+        // and the first match wins.
+        //
+        // Spans are exact because the tokens concatenate back to the text --
+        // each is `token + trailing whitespace`, in order.
+        let mut rebuilt: Vec<MToken> = Vec::with_capacity(tokens.len());
         let mut tags: Vec<String> = Vec::new();
+        let mut pos = 0usize;
         for (si, (stext, sws)) in spacy_tokens.iter().enumerate() {
             let tag = group_tags.get(si).copied().unwrap_or("NN").to_string();
             let subs: Vec<String> = self
@@ -634,16 +638,34 @@ impl G2P {
             let subs = if subs.is_empty() { vec![stext.clone()] } else { subs };
             let n = subs.len();
             for (j, sub) in subs.into_iter().enumerate() {
+                let start = pos;
+                let end = pos + sub.len();
+                pos = end;
                 let mut tk = MToken::new(sub, tag.clone(), String::new());
                 if j + 1 == n {
                     tk.whitespace = sws.clone();
+                    pos += sws.len();
                 }
-                // carry over anything preprocess_links attached
-                if let Some(src) = marked.iter().find(|m| m.text == tk.text) {
-                    if src.phonemes.is_some() {
-                        tk.phonemes = src.phonemes.clone();
+                let mut first_in_span = true;
+                for marker in &markers {
+                    if start >= marker.byte_start && end <= marker.byte_end {
+                        match &marker.feature {
+                            LinkFeature::Stress(st) => {
+                                tk.underscore_mut().stress = Some(*st);
+                            }
+                            LinkFeature::Phonemes(ph) => {
+                                // Only the head subtoken takes the override;
+                                // the rest are blanked so the loop skips them
+                                // (`phonemes = v.lstrip('/') if i == 0 else ''`).
+                                tk.phonemes =
+                                    Some(if first_in_span { ph.clone() } else { String::new() });
+                                first_in_span = false;
+                            }
+                            LinkFeature::NumFlags(f) => {
+                                tk.underscore_mut().num_flags = f.clone();
+                            }
+                        }
                     }
-                    tk.underscore_mut().stress = src.underscore().stress;
                 }
                 rebuilt.push(tk);
                 tags.push(tag.clone());
