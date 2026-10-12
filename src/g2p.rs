@@ -861,7 +861,37 @@ impl G2P {
                         // Handle hyphenated words like "twenty-one"
                         let parts: Vec<&str> = word.split('-').filter(|s| !s.is_empty()).collect();
                         let mut sub_ps = Vec::new();
-                        for part in parts {
+                        for (pi, part) in parts.iter().enumerate() {
+                            // misaki reads a three-digit group that is NOT the
+                            // head of the number as digit-then-pair rather than
+                            // hundreds (`Lexicon.get_number`):
+                            //
+                            //     elif len(num) == 3 and not num.endswith('00'):
+                            //         extend_num(num[0])
+                            //         if num[1] == '0': ... 'O' ... else: extend_num(num[1:])
+                            //
+                            // so the 555 of a phone number is "five fifty five",
+                            // not "five hundred fifty five". The head keeps the
+                            // ordinary reading, which is why the 800 of
+                            // 1-800-555-0199 stays "eight hundred".
+                            let non_head_triple = pi > 0
+                                && part.len() == 3
+                                && part.chars().all(|c| c.is_ascii_digit())
+                                && !part.ends_with("00")
+                                && !part.starts_with('0');
+                            if non_head_triple {
+                                let first = &part[..1];
+                                let rest = &part[1..];
+                                let spoken = if rest.starts_with('0') {
+                                    format!("{} O {}", Self::spell(first), Self::spell(&rest[1..]))
+                                } else {
+                                    format!("{} {}", Self::spell(first), Self::spell(rest))
+                                };
+                                if let Some(p) = self.number_phonemes(&spoken) {
+                                    sub_ps.push(p);
+                                    continue;
+                                }
+                            }
                             let (p, _) = self.g2p(part)?;
                             sub_ps.push(p);
                         }
@@ -1479,6 +1509,17 @@ impl G2P {
         } else {
             Some(out.join(" "))
         }
+    }
+
+    /// A digit group as words, for the number paths that need a piece spelled
+    /// without going back through the full `convert_number`.
+    fn spell(digits: &str) -> String {
+        digits
+            .parse::<i64>()
+            .ok()
+            .and_then(|n| Num2Words::new(n).to_words().ok())
+            .map(|w| Self::normalize_num_words(&w))
+            .unwrap_or_else(|| digits.to_string())
     }
 
     fn convert_number(&self, word: &str) -> String {

@@ -121,15 +121,27 @@ impl Lexicon {
                     }
                 }
 
-                // Try specific tag, then parent tag, then DEFAULT
-                if let Some(Some(ps)) = map.get(current_tag) {
-                    return Some(ps.clone());
+                // misaki:
+                //
+                //     elif tag not in ps:
+                //         tag = Lexicon.get_parent_tag(tag)
+                //     ps = ps.get(tag, ps['DEFAULT'])
+                //
+                // The parent tag is tried only when the tag is not a KEY, and
+                // the value found may be an explicit None -- which means "no
+                // pronunciation for this part of speech", NOT "fall back to
+                // DEFAULT". us_gold holds ME as {DEFAULT: mˌi, NOUN: None}, so
+                // ME tagged NNP resolves through NOUN to None and then to
+                // get_NNP, giving ˌɛmˈi. Skipping past the None to DEFAULT read
+                // it as the word "me".
+                let mut t = current_tag;
+                if !map.contains_key(t) {
+                    t = Lexicon::get_parent_tag(t);
                 }
-                let parent = Lexicon::get_parent_tag(current_tag);
-                if let Some(Some(ps)) = map.get(parent) {
-                    return Some(ps.clone());
+                match map.get(t) {
+                    Some(v) => v.clone(),
+                    None => map.get("DEFAULT").and_then(|opt| opt.clone()),
                 }
-                map.get("DEFAULT").and_then(|opt| opt.clone())
             }
         }
     }
