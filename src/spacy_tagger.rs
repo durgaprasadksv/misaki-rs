@@ -62,7 +62,7 @@ fn thinc_hash(val: u64, seed: u32) -> [u32; 4] {
 
 /// spaCy's StringStore hash: MurmurHash64A over the UTF-8 bytes, seed 1.
 /// Verified against `spacy.strings.hash_string` on ASCII and non-ASCII input.
-fn hash_string(s: &str) -> u64 {
+pub fn hash_string(s: &str) -> u64 {
     const M: u64 = 0xc6a4_a793_5bd1_e995;
     const R: u32 = 47;
     let data = s.as_bytes();

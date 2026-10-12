@@ -607,7 +607,14 @@ impl G2P {
             .map(|g| {
                 let sub = &tokens[g.clone()];
                 let (t, _, ws) = Self::merge_text_tag(sub);
-                (t.clone(), t.to_lowercase(), !ws.is_empty())
+                // NORM is not lowercasing. spaCy resolves it through
+                // BASE_NORMS, the tokenizer exceptions and lexeme_norm first,
+                // and the entry that matters most here is the curly apostrophe
+                // normalising to the straight one: with norm `’` the tagger
+                // calls a possessive `''`, with norm `'` it calls it POS, and
+                // misaki merges only the latter into its word.
+                let norm = crate::norms::norm_of(&t, crate::spacy_tagger::hash_string);
+                (t.clone(), norm, !ws.is_empty())
             })
             .collect();
         let group_tags = self.spacy_tagger.tag(&tagger_input);
