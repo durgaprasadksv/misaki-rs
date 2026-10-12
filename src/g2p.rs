@@ -1710,10 +1710,18 @@ mod tests {
             assert!(out.contains(c), "{c:?} dropped: {out:?}");
         }
 
-        // Non-vocab ASCII punctuation should still collapse to space.
+        // Parentheses ARE preserved. This assertion used to require the
+        // opposite, which was the pre-fork behaviour: misaki maps spaCy's
+        // -LRB-/-RRB- tags to '(' and ')' via PUNCT_TAG_PHONEMES
+        // (`en.py:598-599`), and misaki 0.9.4 gives
+        //
+        //     "hello (world)" -> həlˈO (wˈɜɹld)
+        //
+        // verified against the oracle. The gate is misaki's output, so the test
+        // follows it rather than the other way round.
         let (out, _) = g2p.g2p("hello (world)").unwrap();
-        assert!(!out.contains('('), "( unexpectedly preserved: {out:?}");
-        assert!(!out.contains(')'), ") unexpectedly preserved: {out:?}");
+        assert!(out.contains('('), "( dropped: {out:?}");
+        assert!(out.contains(')'), ") dropped: {out:?}");
     }
 
     #[test]
