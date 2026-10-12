@@ -98,6 +98,7 @@ pub struct G2P {
     #[allow(dead_code)]
     tagger: PerceptronTagger,
     spacy_tagger: crate::spacy_tagger::Tagger,
+    spacy_tokenizer: crate::spacy_tokenizer::SpacyTokenizer,
     rules: Box<dyn LanguageRules>,
     fallback: Option<Box<dyn Fallback>>,
 }
@@ -172,6 +173,7 @@ impl G2P {
             // The ported spaCy tagger. Kept alongside the perceptron rather
             // than replacing it so the old one stays available for comparison.
             spacy_tagger: crate::spacy_tagger::Tagger::load(),
+            spacy_tokenizer: crate::spacy_tokenizer::SpacyTokenizer::new(),
             rules,
             fallback,
         }
@@ -590,41 +592,64 @@ impl G2P {
         // table through its tokenizer ("n't" -> "not"), which only fires on
         // pieces its own tokenizer produces; ours does not produce them, and
         // the group text ("hadn't") is what gets tagged.
-        // The tagger input must be spaCy's TOKENS, because misaki's grouping
-        // rule is `tk.tag in PUNCT_TAGS` on those tokens -- and whether `_`
-        // merges into its neighbour is decided by nothing else. spaCy tags the
-        // `_` in `_like` as UH (misaki merges it) and the one in `_it` as NFP
-        // (misaki does not), from structurally identical input.
+        // misaki's pipeline, now reproduced rather than approximated:
         //
-        // Our subtokens already agree with spaCy wherever it matters: `_`, `'`
-        // and `’` come out separate, `It's` and `hadn't` come out whole, and
-        // `five`/`-`/`storied` matches. The one systematic difference is the
-        // period: we always split it, spaCy keeps its known abbreviations
-        // together. So merge exactly those runs and tag the result.
-        let groups_for_tagging = Self::group_for_tagging(&tokens);
-        let tagger_input: Vec<(String, String, bool)> = groups_for_tagging
+        //     doc = self.nlp(text)                  # spaCy tokenize + tag
+        //     mutable_tokens = [MToken(text=tk.text, tag=tk.tag_, ...) for tk in doc]
+        //     ... retokenize: subtokenize(token.text), each subtoken keeping the
+        //         parent's tag, the LAST one keeping the parent's whitespace
+        //
+        // The grouping rule downstream is `tk.tag in PUNCT_TAGS` on a spaCy
+        // token, so the tags have to come from spaCy's tokenization and not
+        // from ours. Both halves are now exact against spaCy (771/771
+        // sentences for the tokenizer, 20623/20623 tokens for the tagger), so
+        // the approximations that used to live here -- merging abbreviations
+        // and apostrophe pieces to guess at spaCy's boundaries -- are gone.
+        let spacy_tokens = self.spacy_tokenizer.tokenize(&processed_text);
+        let tagger_input: Vec<(String, String, bool)> = spacy_tokens
             .iter()
-            .map(|g| {
-                let sub = &tokens[g.clone()];
-                let (t, _, ws) = Self::merge_text_tag(sub);
-                // NORM is not lowercasing. spaCy resolves it through
-                // BASE_NORMS, the tokenizer exceptions and lexeme_norm first,
-                // and the entry that matters most here is the curly apostrophe
-                // normalising to the straight one: with norm `’` the tagger
-                // calls a possessive `''`, with norm `'` it calls it POS, and
-                // misaki merges only the latter into its word.
-                let norm = crate::norms::norm_of(&t, crate::spacy_tagger::hash_string);
+            .map(|(t, ws)| {
+                let norm = crate::norms::norm_of(t, crate::spacy_tagger::hash_string);
                 (t.clone(), norm, !ws.is_empty())
             })
             .collect();
         let group_tags = self.spacy_tagger.tag(&tagger_input);
-        let mut tags: Vec<String> = Vec::with_capacity(tokens.len());
-        for (gi, g) in groups_for_tagging.iter().enumerate() {
-            let tag = group_tags.get(gi).copied().unwrap_or("NN").to_string();
-            for _ in g.clone() {
+        // Subtokenize each spaCy token with misaki's SUBTOKEN_REGEX. Every
+        // subtoken inherits the parent's tag; only the last carries the
+        // parent's trailing whitespace (`tks[-1].whitespace = token.whitespace`).
+        //
+        // Link markers were applied to the old subtoken list, so anything they
+        // set is carried across by matching text; a marker that lands on a
+        // token this rebuild splits differently keeps the head override.
+        let marked: Vec<MToken> = tokens.clone();
+        let mut rebuilt: Vec<MToken> = Vec::with_capacity(marked.len());
+        let mut tags: Vec<String> = Vec::new();
+        for (si, (stext, sws)) in spacy_tokens.iter().enumerate() {
+            let tag = group_tags.get(si).copied().unwrap_or("NN").to_string();
+            let subs: Vec<String> = self
+                .subtoken_regex
+                .find_iter(stext)
+                .map(|m| m.as_str().to_string())
+                .collect();
+            let subs = if subs.is_empty() { vec![stext.clone()] } else { subs };
+            let n = subs.len();
+            for (j, sub) in subs.into_iter().enumerate() {
+                let mut tk = MToken::new(sub, tag.clone(), String::new());
+                if j + 1 == n {
+                    tk.whitespace = sws.clone();
+                }
+                // carry over anything preprocess_links attached
+                if let Some(src) = marked.iter().find(|m| m.text == tk.text) {
+                    if src.phonemes.is_some() {
+                        tk.phonemes = src.phonemes.clone();
+                    }
+                    tk.underscore_mut().stress = src.underscore().stress;
+                }
+                rebuilt.push(tk);
                 tags.push(tag.clone());
             }
         }
+        tokens = rebuilt;
 
         log::debug!(
             "g2p '{}' -> {} tokens, {} tags",
