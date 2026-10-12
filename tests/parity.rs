@@ -80,7 +80,7 @@ fn run(path: &str) -> Report {
         if ps_match { r.ps_ok += 1; }
         if tok_match { r.tok_ok += 1; }
         if ps_match && tok_match { r.both_ok += 1; }
-        if !ps_match && r.first.len() < 10 {
+        if !ps_match && r.first.len() < 30 {
             r.first.push((c.text.clone(), c.ps.clone(), ps.clone()));
         }
     }

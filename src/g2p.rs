@@ -905,6 +905,43 @@ impl G2P {
                     // text is the first point at which it looks like an ordinal
                     // at all. Without this `1st` read as "one" and `23rd` as
                     // "twenty three".
+                    // Currency. misaki's `Lexicon.get_number` pairs the
+                    // dot-separated parts with CURRENCIES[sym] -- $ is
+                    // (dollar, cent), £ is (pound, pence), € is (euro, cent) --
+                    // drops a zero part, joins the rest with "and", and uses the
+                    // singular at exactly one:
+                    //
+                    //   $9        -> nine dollars
+                    //   $1        -> one dollar
+                    //   $0.50     -> fifty cents        (the zero major is dropped)
+                    //   $1,250.75 -> one thousand two hundred fifty dollars
+                    //                and seventy five cents
+                    if let Some(spoken) = self.currency_words(&text) {
+                        if let Ok((p, _)) = self.g2p(&spoken) {
+                            // misaki keeps the SYMBOL as its own token with
+                            // empty phonemes and hangs the words off the number:
+                            // `$9` is [('$', ''), ('9', 'nˈIn dˈɑləɹz')]. Emitting
+                            // one merged token instead gave the right audio with
+                            // the wrong word boundaries.
+                            let mut sym = group[0].clone();
+                            let mut it = text.chars();
+                            let s0 = it.next().unwrap();
+                            sym.text = s0.to_string();
+                            sym.tag = "$".to_string();
+                            sym.whitespace = String::new();
+                            sym.phonemes = Some(String::new());
+                            merged.push(sym);
+
+                            let mut tk = group[0].clone();
+                            tk.text = it.collect();
+                            tk.tag = tag;
+                            tk.whitespace = ws;
+                            tk.phonemes = Some(p.trim_end().to_string());
+                            merged.push(tk);
+                            continue;
+                        }
+                    }
+
                     if self.is_number_like(&text) {
                         let spoken = self.convert_number(&text);
                         if spoken != text {
@@ -1108,6 +1145,11 @@ impl G2P {
                 }
             }
         }
+        if let Some(rest) = clean.strip_prefix('-') {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                return true;
+            }
+        }
         self.is_number(word)
     }
 
@@ -1161,8 +1203,68 @@ impl G2P {
         }
     }
 
+    /// A currency amount spelled out, or None if `word` is not one.
+    ///
+    /// See the call site for misaki's rules; the units come from its CURRENCIES
+    /// table.
+    fn currency_words(&self, word: &str) -> Option<String> {
+        let mut cs = word.chars();
+        let sym = cs.next()?;
+        let units: (&str, &str) = match sym {
+            '$' => ("dollar", "cent"),
+            '\u{a3}' => ("pound", "pence"),
+            '\u{20ac}' => ("euro", "cent"),
+            _ => return None,
+        };
+        let rest: String = cs.collect::<String>().replace(',', "");
+        if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return None;
+        }
+        let mut parts: Vec<(i64, &str)> = Vec::new();
+        for (i, seg) in rest.split('.').enumerate().take(2) {
+            let n: i64 = if seg.is_empty() { 0 } else { seg.parse().ok()? };
+            parts.push((n, if i == 0 { units.0 } else { units.1 }));
+        }
+        // misaki drops a zero part rather than saying "zero dollars".
+        if parts.len() > 1 {
+            if parts[1].0 == 0 {
+                parts.truncate(1);
+            } else if parts[0].0 == 0 {
+                parts.remove(0);
+            }
+        }
+        let mut out: Vec<String> = Vec::new();
+        for (n, unit) in parts {
+            if !out.is_empty() {
+                out.push("and".to_string());
+            }
+            out.push(Self::normalize_num_words(
+                &Num2Words::new(n).to_words().ok()?,
+            ));
+            out.push(if n == 1 {
+                unit.to_string()
+            } else {
+                format!("{unit}s")
+            });
+        }
+        Some(out.join(" "))
+    }
+
     fn convert_number(&self, word: &str) -> String {
         let clean = word.replace(",", "");
+
+        // misaki prefixes "minus" for a leading '-' (`Lexicon.get_number`):
+        //
+        //     if word.startswith('-'):
+        //         result.append(self.lookup('minus', ...))
+        //         word = word[1:]
+        //
+        // We were dropping the sign, so -40 read as "forty".
+        if let Some(rest) = clean.strip_prefix('-') {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                return format!("minus {}", self.convert_number(rest));
+            }
+        }
 
         // Ordinals. misaki (`Lexicon.get_number`) peels an alphabetic suffix
         // and, when it is one of ORDINALS = {st, nd, rd, th} and the rest is
