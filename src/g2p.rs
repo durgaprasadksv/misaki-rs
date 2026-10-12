@@ -828,8 +828,13 @@ impl G2P {
                     } else if self.is_number_like(&word) {
                         let spoken = self.convert_number(&word);
                         if spoken != word {
-                            let (p, _) = self.g2p(&spoken)?;
-                            tokens[i].phonemes = Some(p);
+                            // Word by word, so "point" keeps its -2 stress.
+                            if let Some(p) = self.number_phonemes(&spoken) {
+                                tokens[i].phonemes = Some(p);
+                            } else {
+                                let (p, _) = self.g2p(&spoken)?;
+                                tokens[i].phonemes = Some(p.trim_end().to_string());
+                            }
                         }
                     }
                 }
@@ -1071,12 +1076,16 @@ impl G2P {
                     if self.is_number_like(&text) {
                         let spoken = self.convert_number(&text);
                         if spoken != text {
-                            if let Ok((p, _)) = self.g2p(&spoken) {
+                            // Word by word, so "point" keeps its -2 stress; the
+                            // phrase path is only a fallback.
+                            if let Some(p) = self.number_phonemes(&spoken).or_else(|| {
+                                self.g2p(&spoken).ok().map(|(p, _)| p.trim_end().to_string())
+                            }) {
                                 let mut tk = group[0].clone();
                                 tk.text = text;
                                 tk.tag = tag;
                                 tk.whitespace = ws;
-                                tk.phonemes = Some(p.trim_end().to_string());
+                                tk.phonemes = Some(p);
                                 merged.push(tk);
                                 continue;
                             }
