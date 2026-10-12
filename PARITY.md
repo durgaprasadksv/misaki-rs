@@ -62,32 +62,76 @@ needed to *run* the tests.
 | as forked | 0% | 0% |
 | + 0.9.4 lexicons, flap pass, real whitespace | 49.3% | 40.3% |
 | + `token_context` ported | 52.1% | 41.0% |
-| + OOV stays unresolved, PUNCTS ported | **53.5%** | **57.1%** |
+| + OOV unresolved, PUNCTS ported | 53.5% | 57.1% |
+| + number forms, adjacency merge, abbreviations | 62.0% | 63.9% |
+| + apostrophe normalisation, acronym trigger | 60.6% | 74.7% |
+| + stemmers keep case | 66.2% | 74.7% |
+| + capitalisation stress, stress rebalancing | 64.8% | 81.1% |
+| + prespace guard, ordinals | 67.6% | 81.1% |
+| + underscore merges, opening quote stands alone | 67.6% | 83.9% |
+| + multi-token span loop | **67.6%** | **84.7%** |
 
-Target is 100% on both. The adversarial corpus is deliberately hostile
-(heteronyms, acronyms, dates, currency, quotes) and is not representative of
-real text; report both numbers, because an implementation can score well on
-prose while failing every heteronym — the failure a listener notices most.
+Phoneme strings alone match on 87.7% of prose; the gate is the lower of that
+and per-token attribution, because `pred_dur` is per token.
 
-## Known remaining gaps
+Target is 100% on both.
 
-In rough order of how many cases they account for:
+## What is left, measured rather than guessed
 
-1. **Acronyms.** `get_NNP` is not wired: `PDFs` → `pˈi dˈi ˈɛf ˈɛs` where misaki
-   gives `pˌidˌiˈɛfs` (joined, secondary stresses, plural `s` as a suffix rather
-   than a spelled letter). `stem_s`/`append_s` exist; the NNP path that calls
-   them does not.
-2. **The POS tagger.** The embedded `PerceptronTagger` does not reproduce
-   spaCy's tags. Two consequences: heteronyms resolve wrongly (`I read
-   yesterday` → present tense), and punctuation is mis-tagged (`“` as `NNP`,
-   `’` as `VBP`), which is why `PUNCT_TAG_PHONEMES` had to be approached by
-   character here rather than by tag. Exposure on heteronyms is **bounded**:
-   only 790 of 90,201 gold entries are POS-conditional.
-3. **The multi-token word layer.** `fold_left`, `retokenize`, `merge_tokens`,
-   `resolve_tokens`, `stress_weight`, `make_subtokenize_once` are all absent.
-   `resolve_tokens` is what rebalances stress across a multi-token word, which
-   is behind the residual `ˈ`/`ˌ` differences (`in` → `ˈɪn` vs `ɪn`).
-   Contractions also mis-split: `It’s` becomes `It` + `’` + `s`.
-4. **Numbers, currency, ordinals.** `is_currency`, `get_number`,
-   `append_currency`, `numeric_if_needed` are absent or partial. `num2words` is
-   already a dependency, so the primitive is available.
+On the 623 prose cases where **tokenization already agrees**:
+
+| | |
+|---|---|
+| phonemes match | 593 |
+| fail, and the POS tag also differs | **64** |
+| fail with every tag correct | **9** |
+
+So the ported logic is essentially right, and the dominant remaining cause is
+the **POS tagger**. Its agreement with spaCy is **89-90%**, and the
+disagreements that change pronunciation are exactly the ones misaki keys on:
+
+| spaCy -> ours | n | effect |
+|---|---|---|
+| `DT` -> `NNP` on *A* | 8 | `ɐ` vs `ˈA` -- `get_special_case` branches on `tag == 'DT'` |
+| `DT`/`IN` confusion on *that* | 21 | `ðˈæt` vs `ðæt` (a POS-conditional lexicon entry) |
+| `RB`/`RP` -> `IN` on *in* | 6 | stress |
+| `VBD` -> `NN` on *dove*, *read* | — | the heteronyms |
+
+### Reaching 100% means shipping spaCy's tagger
+
+misaki's pronunciation is POS-conditional (790 of 90,201 gold entries are
+tag-keyed, plus the `get_special_case` branches), so exact parity requires
+exactly spaCy's tags. The embedded `PerceptronTagger` cannot get there; it is a
+different model class.
+
+`en_core_web_sm`'s tagger is small and fully specified, which makes this
+bounded work rather than open-ended:
+
+```
+MultiHashEmbed   6 hash embeddings (NORM/PREFIX/SUFFIX/SHAPE/...) -> 576
+                 -> maxout -> layernorm -> 96
+MaxoutWindowEncoder  4x residual(expand_window(3) -> maxout -> layernorm)
+Softmax          96 -> 50 tags
+```
+
+**1,565,664 parameters, 6.3 MB fp32** — smaller than the lexicons already
+vendored here. Every operation is elementary (hash lookup, affine, maxout as a
+reshape-and-max, layernorm, residual, window concat); the only fidelity risk is
+reproducing Thinc's MurmurHash seeding exactly. No ONNX runtime is required,
+though a Kokoro service already carries one.
+
+Projected: fixing the tagger should convert most of those 64, giving roughly
+94%. The remaining ~6% is the 77 cases where tokenization still disagrees plus
+the 9 residual logic failures — both visible to the gate and chaseable the same
+way everything above was.
+
+## Known remaining gaps, in order
+
+1. **POS tagger** — 64 of 73 wrong-phoneme tokens. See above.
+2. **Tokenization** — 77 of 700 prose cases still differ in token count.
+   Remaining shapes are rarer: bracketed citations, stacked quotes, `17—.`
+3. **Currency** — `append_currency` is unwired, so `$9` gives `nˈIn` and not
+   `nˈIn dˈɑləɹz`. `is_currency`/`numeric_if_needed` are absent.
+4. **Negative numbers** — misaki renders `-40` as the empty string; we read it
+   as "forty".
+5. **`grow_dictionary`** — absent; nothing in our pipeline calls it.
