@@ -303,7 +303,15 @@ impl Lexicon {
         stress: Option<f64>,
         ctx: Option<&TokenContext>,
     ) -> Option<(String, i32)> {
-        let lower = word.to_lowercase();
+        // misaki stems the word AS GIVEN -- `stem_s`, `stem_ed` and `stem_ing`
+        // all read `word`, never `word.lower()`. Lowercasing first destroys the
+        // all-caps acronym rule in `is_known`, whose last line is
+        // `word[1:] == word[1:].upper()`: is_known("PDF") is true, is_known("pdf")
+        // is false. So "PDFs" failed to stem at all and resolved to nothing,
+        // instead of lookup("PDF") -> pˌidˌiˈɛf then _s -> pˌidˌiˈɛfs.
+        // Keeping the case also keeps misaki's quirk that "DOGS" does NOT stem,
+        // since it ends in 'S' rather than 's'.
+        let lower = word.to_string();
         if lower.len() < 3 || !lower.ends_with('s') {
             return None;
         }
@@ -350,7 +358,15 @@ impl Lexicon {
         stress: Option<f64>,
         ctx: Option<&TokenContext>,
     ) -> Option<(String, i32)> {
-        let lower = word.to_lowercase();
+        // misaki stems the word AS GIVEN -- `stem_s`, `stem_ed` and `stem_ing`
+        // all read `word`, never `word.lower()`. Lowercasing first destroys the
+        // all-caps acronym rule in `is_known`, whose last line is
+        // `word[1:] == word[1:].upper()`: is_known("PDF") is true, is_known("pdf")
+        // is false. So "PDFs" failed to stem at all and resolved to nothing,
+        // instead of lookup("PDF") -> pˌidˌiˈɛf then _s -> pˌidˌiˈɛfs.
+        // Keeping the case also keeps misaki's quirk that "DOGS" does NOT stem,
+        // since it ends in 'S' rather than 's'.
+        let lower = word.to_string();
         if lower.len() < 4 || !lower.ends_with('d') {
             return None;
         }
@@ -435,7 +451,15 @@ impl Lexicon {
         stress: Option<f64>,
         ctx: Option<&TokenContext>,
     ) -> Option<(String, i32)> {
-        let lower = word.to_lowercase();
+        // misaki stems the word AS GIVEN -- `stem_s`, `stem_ed` and `stem_ing`
+        // all read `word`, never `word.lower()`. Lowercasing first destroys the
+        // all-caps acronym rule in `is_known`, whose last line is
+        // `word[1:] == word[1:].upper()`: is_known("PDF") is true, is_known("pdf")
+        // is false. So "PDFs" failed to stem at all and resolved to nothing,
+        // instead of lookup("PDF") -> pˌidˌiˈɛf then _s -> pˌidˌiˈɛfs.
+        // Keeping the case also keeps misaki's quirk that "DOGS" does NOT stem,
+        // since it ends in 'S' rather than 's'.
+        let lower = word.to_string();
         if lower.len() < 5 || !lower.ends_with("ing") {
             return None;
         }
