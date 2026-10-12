@@ -422,18 +422,22 @@ impl G2P {
     ///
     /// with PUNCTS = ';:,.!?\u2014\u2026"\u201c\u201d' and `` -> \u201c, '' -> \u201d, -LRB- -> (,
     /// -RRB- -> ). An empty result is correct for a symbol in no class (`*`).
-    fn punct_phonemes(text: &str) -> String {
+    fn punct_phonemes(text: &str, tag: &str) -> String {
         const PUNCTS: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}";
-        text.chars()
-            .map(|c| match c {
-                '\u{2018}' | '`' => '\u{201c}',
-                '\u{2019}' | '\'' => '\u{201d}',
-                '[' | '{' => '(',
-                ']' | '}' => ')',
-                other => other,
-            })
-            .filter(|c| PUNCTS.contains(*c) || matches!(c, '(' | ')'))
-            .collect()
+        // PUNCT_TAG_PHONEMES first, by TAG. This is keyed on the tag and not on
+        // the character, which is what distinguishes an opening quote from a
+        // closing one: in `'Single quotes'` spaCy tags the first apostrophe ``
+        // and the second '', so misaki renders “ then ” from identical
+        // characters. A straight `"` is likewise “ or ” depending on side.
+        match tag {
+            "-LRB-" => return "(".to_string(),
+            "-RRB-" => return ")".to_string(),
+            "``" => return "\u{201c}".to_string(),
+            "''" | "\"\"" => return "\u{201d}".to_string(),
+            _ => {}
+        }
+        // Otherwise keep only the characters that are in PUNCTS.
+        text.chars().filter(|c| PUNCTS.contains(*c)).collect()
     }
 
     /// Port of misaki's `G2P.token_context` (`en.py`).
@@ -746,7 +750,8 @@ impl G2P {
                 continue;
             }
             if Self::is_punct_token(&tokens[i]) {
-                tokens[i].phonemes = Some(Self::punct_phonemes(&tokens[i].text));
+                let tg = tokens[i].tag.clone();
+                tokens[i].phonemes = Some(Self::punct_phonemes(&tokens[i].text, &tg));
             }
         }
 
@@ -815,7 +820,9 @@ impl G2P {
                         // it. This is handled here as well as in the merge pass
                         // because spaCy puts the symbol in its own token, so a
                         // bare `$9` never forms a multi-token group at all.
-                        if let Ok((p, _)) = self.g2p(&spoken) {
+                        if let Some(p) = self.number_phonemes(&spoken) {
+                            tokens[i].phonemes = Some(p);
+                        } else if let Ok((p, _)) = self.g2p(&spoken) {
                             tokens[i].phonemes = Some(p.trim_end().to_string());
                         }
                     } else if self.is_number_like(&word) {
@@ -1270,6 +1277,18 @@ impl G2P {
                 return true;
             }
         }
+        // A single decimal point, digits on both sides.
+        if clean.matches('.').count() == 1 {
+            if let Some((a, b)) = clean.split_once('.') {
+                if !a.is_empty()
+                    && !b.is_empty()
+                    && a.chars().all(|c| c.is_ascii_digit())
+                    && b.chars().all(|c| c.is_ascii_digit())
+                {
+                    return true;
+                }
+            }
+        }
         self.is_number(word)
     }
 
@@ -1368,6 +1387,29 @@ impl G2P {
         Some(out.join(" "))
     }
 
+    /// Phonemes for a spoken number phrase, looked up word by word.
+    ///
+    /// misaki's `get_number` does not phonemise the phrase as text -- it looks
+    /// each word up on its own, and gives "point" a stress of -2:
+    ///
+    ///     result.append(self.lookup(w, None, -2 if w == 'point' else None, None))
+    ///
+    /// Re-running the whole phrase through g2p instead left "point" stressed,
+    /// so 3.5 came out θɹˈi pˈYnt fˈIv where misaki gives θɹˈi pYnt fˈIv.
+    fn number_phonemes(&self, spoken: &str) -> Option<String> {
+        let mut out: Vec<String> = Vec::new();
+        for w in spoken.split_whitespace() {
+            let stress = if w == "point" { Some(-2.0) } else { None };
+            let (ps, _) = self.lexicon.get_word(w, "NN", stress, None)?;
+            out.push(ps);
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out.join(" "))
+        }
+    }
+
     fn convert_number(&self, word: &str) -> String {
         let clean = word.replace(",", "");
 
@@ -1425,6 +1467,32 @@ impl G2P {
                 return Self::normalize_num_words(&spoken);
             }
         }
+
+        // A single decimal point: the integer part as a cardinal, then "point",
+        // then each fractional DIGIT on its own. Verified against misaki:
+        //
+        //   3.5    -> three point five        3.75   -> three point seven five
+        //   1.25   -> one point two five      100.01 -> one hundred point zero one
+        if clean.matches('.').count() == 1 {
+            let (int_part, frac) = clean.split_once('.').unwrap();
+            let int_ok = !int_part.is_empty() && int_part.chars().all(|c| c.is_ascii_digit());
+            let frac_ok = !frac.is_empty() && frac.chars().all(|c| c.is_ascii_digit());
+            if int_ok && frac_ok {
+                if let Ok(iv) = int_part.parse::<i64>() {
+                    if let Ok(head) = Num2Words::new(iv).to_words() {
+                        let mut out = vec![Self::normalize_num_words(&head), "point".to_string()];
+                        for d in frac.chars() {
+                            let dv = (d as u8 - b'0') as i64;
+                            if let Ok(w) = Num2Words::new(dv).to_words() {
+                                out.push(Self::normalize_num_words(&w));
+                            }
+                        }
+                        return out.join(" ");
+                    }
+                }
+            }
+        }
+
         word.to_string()
     }
 }
