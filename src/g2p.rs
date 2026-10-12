@@ -794,7 +794,17 @@ impl G2P {
                         // diphthong) against kˈɔkəs's 6, so Race loses its primary.
                         let mut parts: Vec<String> =
                             group.iter().map(|tk| part_of(tk)).collect();
-                        {
+                        // `resolve_tokens` RETURNS before rebalancing when the
+                        // parts are space-separated:
+                        //
+                        //     if prespace:
+                        //         return
+                        //
+                        // so a mixed-class word keeps every primary stress.
+                        // That is why misaki gives `50%` as fˈɪfti pəɹsˈɛnt and not
+                        // fˌɪfti pəɹsˈɛnt -- '5','0' and '%' are different classes,
+                        // prespace is true, and no demotion happens.
+                        if !prespace {
                             const PRIMARY: char = '\u{2c8}';
                             const DIPHTHONGS: &str = "AIOQWY\u{2a4}\u{2a7}";
                             let weight = |ps: &str| -> usize {
@@ -928,6 +938,29 @@ impl G2P {
 
     fn convert_number(&self, word: &str) -> String {
         let clean = word.replace(",", "");
+
+        // Ordinals. misaki (`Lexicon.get_number`) peels an alphabetic suffix
+        // and, when it is one of ORDINALS = {st, nd, rd, th} and the rest is
+        // digits, reads the ORDINAL form:
+        //
+        //     if is_digit(word) and suffix in ORDINALS:
+        //         extend_num(num2words(int(word), to='ordinal'), escape=True)
+        //
+        // Without it "23rd" read as "twenty three" and "1st" as "one".
+        {
+            let lower = clean.to_lowercase();
+            for suf in ["st", "nd", "rd", "th"] {
+                if let Some(digits) = lower.strip_suffix(suf) {
+                    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                        if let Ok(n) = digits.parse::<i64>() {
+                            if let Ok(spoken) = Num2Words::new(n).ordinal().to_words() {
+                                return Self::normalize_num_words(&spoken);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Bare four-digit numbers read as years, per misaki's get_number.
         if clean.len() == 4 && clean.chars().all(|c| c.is_ascii_digit()) {
