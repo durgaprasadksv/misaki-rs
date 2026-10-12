@@ -195,6 +195,136 @@ impl G2P {
         (stripped, markers)
     }
 
+    /// Port of misaki's module-level `merge_tokens` (`en.py`).
+    ///
+    /// Collapses a run of adjacent subtokens into the single word misaki would
+    /// have produced. The text is rebuilt with the interior whitespace put
+    /// back, the group inherits the LAST token's trailing whitespace, and the
+    /// tag comes from the "heaviest" member -- misaki scores each token's text
+    /// as `sum(1 if c == c.lower() else 2 for c in text)` and takes the
+    /// maximum, so `five-storied` takes `storied`'s JJ (7 beats 4 and 1) and
+    /// `It’s` takes `It`'s PRP (3 beats 2).
+    fn merge_text_tag(group: &[MToken]) -> (String, String, String) {
+        let mut text = String::new();
+        for tk in &group[..group.len() - 1] {
+            text.push_str(&tk.text);
+            text.push_str(&tk.whitespace);
+        }
+        text.push_str(&group[group.len() - 1].text);
+
+        let weight = |t: &str| -> usize {
+            t.chars()
+                .map(|c| if c.to_lowercase().next() == Some(c) { 1 } else { 2 })
+                .sum()
+        };
+        let tag = group
+            .iter()
+            .max_by_key(|tk| weight(&tk.text))
+            .map(|tk| tk.tag.clone())
+            .unwrap_or_default();
+
+        let ws = group[group.len() - 1].whitespace.clone();
+        (text, tag, ws)
+    }
+
+    /// Port of the grouping half of misaki's `G2P.retokenize` (`en.py`).
+    ///
+    /// misaki groups subtokens into words by ADJACENCY, not by character
+    /// class: a token with no trailing whitespace opens a group, and each
+    /// following token joins it while the group's last member still has no
+    /// trailing whitespace.
+    ///
+    ///     elif words and isinstance(words[-1], list) and not words[-1][-1].whitespace:
+    ///         tk._.is_head = False; words[-1].append(tk)
+    ///     else:
+    ///         words.append(tk if tk.whitespace else [tk])
+    ///
+    /// This is what lets a finer tokenizer than spaCy's stay correct: `Mr` `.`
+    /// and `It` `’` `s` and `five` `-` `storied` are each adjacent runs, so they
+    /// merge back into `Mr.`, `It’s` and `five-storied`. Returns index ranges
+    /// into `tokens`.
+    fn group_by_adjacency(tokens: &[MToken]) -> Vec<std::ops::Range<usize>> {
+        // misaki's FIRST branch takes precedence over adjacency:
+        //
+        //     if tk._.alias is not None or tk.phonemes is not None:
+        //         words.append(tk)
+        //
+        // and `retokenize` has already assigned phonemes to punctuation by then
+        // (`tk.tag in PUNCT_TAGS` -> PUNCT_TAG_PHONEMES). So a punctuation mark
+        // is always its own word and never merges, which is why `barked` and
+        // `.` stay two tokens even though nothing separates them.
+        //
+        // Our tagger does not reproduce spaCy's punctuation tags, so the test
+        // is on the characters: a token made only of PUNCTS members (or
+        // parens) stands alone. Deliberately NOT included are `-`, `’` and `_`,
+        // which are SUBTOKEN_JUNKS -- they must keep merging, or `five-storied`
+        // and `It’s` fall apart.
+        const STANDALONE: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}()[]{}_*";
+        let is_standalone = |tk: &MToken| -> bool {
+            if tk.text.is_empty() {
+                return false;
+            }
+            // A run of two or more hyphens is a dash, not a joiner: spaCy makes
+            // `him--the` three tokens and tags `--` as ':', which lands in
+            // PUNCT_TAGS. A SINGLE hyphen is tagged HYPH and must keep merging,
+            // or `five-storied` falls apart.
+            if tk.text.len() >= 2 && tk.text.chars().all(|c| c == '-' || c == '\u{2013}') {
+                return true;
+            }
+            // An apostrophe is part of the word only when something follows it
+            // inside the word (`man’s`, `It’s`). With trailing whitespace it is a
+            // closing quote, which spaCy tags '' and misaki renders as ” --
+            // hence `Thomas’ books` staying two tokens.
+            if tk.text.chars().all(|c| c == '\u{2019}' || c == '\'' || c == '\u{2018}')
+                && !tk.whitespace.is_empty()
+            {
+                return true;
+            }
+            tk.text.chars().all(|c| STANDALONE.contains(c))
+        };
+
+        let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut open = false; // is the last group still extensible?
+        for i in 0..tokens.len() {
+            if is_standalone(&tokens[i]) {
+                // ... unless joining it to the open group spells an
+                // abbreviation spaCy would never have split. Our tokenizer
+                // splits on the period unconditionally, so `Mr` + `.` must be
+                // put back together; spaCy's own exception list decides.
+                let rejoin = tokens[i].text == "." && open;
+                if rejoin {
+                    let g = groups.last().unwrap().clone();
+                    let mut candidate = String::new();
+                    for tk in &tokens[g.clone()] {
+                        candidate.push_str(&tk.text);
+                        candidate.push_str(&tk.whitespace);
+                    }
+                    candidate.push('.');
+                    if crate::abbrev::is_period_abbreviation(candidate.trim()) {
+                        let g = groups.last_mut().unwrap();
+                        *g = g.start..i + 1;
+                        open = tokens[i].whitespace.is_empty();
+                        continue;
+                    }
+                }
+                groups.push(i..i + 1);
+                open = false;
+                continue;
+            }
+            if open && tokens[groups.last().unwrap().end - 1].whitespace.is_empty() {
+                let g = groups.last_mut().unwrap();
+                *g = g.start..i + 1;
+            } else {
+                groups.push(i..i + 1);
+                // A token that already carries trailing whitespace is a
+                // finished word: misaki appends it bare rather than as a list,
+                // and only a list can be extended.
+                open = tokens[i].whitespace.is_empty();
+            }
+        }
+        groups
+    }
+
     /// Port of misaki's `G2P.token_context` (`en.py`).
     ///
     /// Decides what the token to the LEFT should assume about what follows it:
@@ -465,7 +595,10 @@ impl G2P {
                                 'ú' | 'ù' | 'û' | 'ü' => 'u',
                                 'ñ' => 'n',
                                 'ç' => 'c',
-                                '—' | '–' => ' ', // map dashes to spaces
+                                // NB: em/en dashes are NOT mapped away here.
+                                // U+2014 is in misaki's PUNCTS and survives as
+                                // itself; mapping it to a space sent it down the
+                                // renormalise path and silently dropped it.
                                 _ => c,
                             })
                             .collect();
@@ -533,6 +666,83 @@ impl G2P {
             }
         }
 
+        // ---- merge adjacent subtokens into words (misaki's `merge_tokens`) ----
+        //
+        // misaki's final token list has ONE token per adjacency group:
+        //
+        //     tokens = [merge_tokens(tk, unk=self.unk) if isinstance(tk, list) else tk
+        //               for tk in tokens]
+        //
+        // and this runs BEFORE the flap pass below, which is why it is placed
+        // here. Without it our tokenizer's finer splits reached the output and
+        // 257 of 700 prose cases differed in token count -- every one of which
+        // corrupts the word timestamps, since `pred_dur` is per token.
+        //
+        // Phonemes are joined with no separator unless `prespace`, which misaki
+        // derives in `resolve_tokens` from the group's text:
+        //
+        //     prespace = ' ' in text or '/' in text or len({0 if c.isalpha()
+        //                else (1 if is_digit(c) else 2) for c in text
+        //                if c not in SUBTOKEN_JUNKS}) > 1
+        //
+        // i.e. a space, a slash, or a MIX of character classes once the junk
+        // characters are ignored. `five-storied` is all-alpha once `-` is
+        // dropped, so it joins tight: fˌIv + stˈɔɹid -> fˌIvstˈɔɹid.
+        {
+            const SUBTOKEN_JUNKS: &str = "',-._\u{2018}\u{2019}/";
+            let groups = Self::group_by_adjacency(&tokens);
+            if groups.len() != tokens.len() {
+                let mut merged: Vec<MToken> = Vec::with_capacity(groups.len());
+                for g in groups {
+                    if g.len() == 1 {
+                        merged.push(tokens[g.start].clone());
+                        continue;
+                    }
+                    let group = &tokens[g.clone()];
+                    let (text, tag, ws) = Self::merge_text_tag(group);
+
+                    let classes: std::collections::BTreeSet<u8> = text
+                        .chars()
+                        .filter(|c| !SUBTOKEN_JUNKS.contains(*c))
+                        .map(|c| if c.is_alphabetic() { 0u8 } else if c.is_ascii_digit() { 1 } else { 2 })
+                        .collect();
+                    let prespace =
+                        text.contains(' ') || text.contains('/') || classes.len() > 1;
+
+                    // misaki tries the whole word in the lexicon first and only
+                    // falls back to stitching the parts together.
+                    let whole = self
+                        .lexicon
+                        .get_word(&text, &tag, None, Some(&contexts[g.start]))
+                        .map(|(ps, _)| ps);
+
+                    let phonemes = whole.or_else(|| {
+                        let mut out = String::new();
+                        for tk in group {
+                            let part = tk.phonemes.clone().unwrap_or_default();
+                            if prespace
+                                && !out.is_empty()
+                                && !out.ends_with(char::is_whitespace)
+                                && !part.is_empty()
+                            {
+                                out.push(' ');
+                            }
+                            out.push_str(&part);
+                        }
+                        Some(out)
+                    });
+
+                    let mut tk = group[0].clone();
+                    tk.text = text;
+                    tk.tag = tag;
+                    tk.whitespace = ws;
+                    tk.phonemes = phonemes;
+                    merged.push(tk);
+                }
+                tokens = merged;
+            }
+        }
+
         // misaki applies exactly this, after all resolution and merging and
         // before assembling the string (`en.py:708-710`, gated on
         // `version != '2.0'`):
@@ -566,15 +776,70 @@ impl G2P {
         clean.parse::<i64>().is_ok()
     }
 
+    /// Reduce a num2words string to the word sequence misaki feeds the lexicon.
+    ///
+    /// misaki does `re.split(r'[^a-z]+', num2words(int(num)))` and looks each
+    /// piece up on its own (`Lexicon.get_number`), so hyphens and commas become
+    /// word boundaries -- "fifty-seven" is two lookups, not one. It also drops
+    /// "and" unless '&' is in num_flags, which is why 2001 reads
+    /// "two thousand one".
+    ///
+    /// Without this, "457" produced `f\u02c8\u0254\u0279 h\u02c8\u028cndr\u0259d f\u02c8\u026afti s\u02c8\u025bv\u0259n` with the last
+    /// two words run together, because "fifty-seven" went to the lexicon whole.
+    fn normalize_num_words(spoken: &str) -> String {
+        spoken
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .filter(|w| !w.is_empty() && *w != "and")
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// num2words' `to='year'` form, which misaki uses for any bare 4-digit
+    /// number that is not a currency amount (`en.py`:
+    /// `len(word) == 4 and currency not in CURRENCIES`).
+    ///
+    /// Verified against Python num2words: 1999 "nineteen ninety-nine",
+    /// 1900 "nineteen hundred", 2000 "two thousand", 2001 "two thousand and
+    /// one", 2005 "two thousand and five", 2010 "twenty ten", 1066 "ten
+    /// sixty-six", 1905 "nineteen oh-five", 1100 "eleven hundred", 2100
+    /// "twenty-one hundred", 1010 "ten ten".
+    fn year_words(y: i64) -> Option<String> {
+        let card = |n: i64| Num2Words::new(n).to_words().ok();
+        let (hi, lo) = (y / 100, y % 100);
+        if lo == 0 {
+            if y % 1000 == 0 {
+                card(y) // 2000 -> two thousand
+            } else {
+                Some(format!("{} hundred", card(hi)?)) // 1900 -> nineteen hundred
+            }
+        } else if hi % 10 == 0 && lo < 10 {
+            card(y) // 2005 -> two thousand and five
+        } else if lo < 10 {
+            Some(format!("{} oh {}", card(hi)?, card(lo)?)) // 1905 -> nineteen oh-five
+        } else {
+            Some(format!("{} {}", card(hi)?, card(lo)?)) // 1999 -> nineteen ninety-nine
+        }
+    }
+
     fn convert_number(&self, word: &str) -> String {
         let clean = word.replace(",", "");
+
+        // Bare four-digit numbers read as years, per misaki's get_number.
+        if clean.len() == 4 && clean.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(y) = clean.parse::<i64>() {
+                if let Some(spoken) = Self::year_words(y) {
+                    return Self::normalize_num_words(&spoken);
+                }
+            }
+        }
+
         if let Ok(val) = clean.parse::<i64>() {
             let n2w = match self.lexicon.lang {
                 Language::EnglishUS | Language::EnglishGB => Num2Words::new(val),
                 // Language::Italian => Num2Words::new(val).lang(num2words::Lang::English),
             };
             if let Ok(spoken) = n2w.to_words() {
-                return spoken;
+                return Self::normalize_num_words(&spoken);
             }
         }
         word.to_string()

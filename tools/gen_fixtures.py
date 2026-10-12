@@ -40,10 +40,16 @@ def main():
         if not text.strip():
             continue
         ps, toks = g(text)
+        # `tags` records spaCy's POS tag per final token. It is not part of the
+        # parity contract -- it exists so the Rust side can be run with
+        # misaki's own tags injected, which separates failures caused by our
+        # tagger from failures caused by missing logic. Without that split you
+        # cannot tell whether a wrong phoneme is a port bug or a tag bug.
         cases.append({
             "text": text,
             "ps": ps,
             "tokens": [[t.text, t.phonemes] for t in toks],
+            "tags": [t.tag for t in toks],
         })
 
     doc = {

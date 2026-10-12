@@ -2,6 +2,7 @@ pub mod token;
 pub mod language;
 pub mod languages;
 pub mod lexicon;
+pub mod abbrev;
 pub mod data;
 pub mod tagger;
 pub mod g2p;
