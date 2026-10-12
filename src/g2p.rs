@@ -358,7 +358,11 @@ impl G2P {
         // so a punctuation mark is always its own word. `is_punct_token` is
         // misaki's own test, on the TAG; the character approximation that used
         // to be here could not tell `_like` from `_it`.
-        let is_standalone = |tk: &MToken, _is_last: bool| -> bool { Self::is_punct_token(tk) };
+        let is_standalone = |tk: &MToken, _is_last: bool| -> bool {
+            // misaki's first branch is `if tk._.alias is not None or
+            // tk.phonemes is not None`, so an aliased token stands alone too.
+            tk.underscore().alias.is_some() || Self::is_punct_token(tk)
+        };
 
         let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
         let mut open = false; // is the last group still extensible?
@@ -641,6 +645,7 @@ impl G2P {
                 .collect();
             let subs = if subs.is_empty() { vec![stext.clone()] } else { subs };
             let n = subs.len();
+            let subs_snapshot = subs.clone();
             for (j, sub) in subs.into_iter().enumerate() {
                 let start = pos;
                 let end = pos + sub.len();
@@ -650,6 +655,32 @@ impl G2P {
                     tk.whitespace = sws.clone();
                     pos += sws.len();
                 }
+                // misaki's `2` -> `to` alias (`retokenize`):
+                //
+                //     elif 0 < j < len(tks)-1 and tk.text == '2' \
+                //          and (tks[j-1].text[-1]+tks[j+1].text[0]).isalpha():
+                //         tk._.alias = 'to'
+                //
+                // A `2` strictly inside a word with letters either side is read
+                // as "to", which is what makes `G2P` ʤˈitəpˈi. The alias also
+                // makes the token stand alone, since misaki's first grouping
+                // branch takes any token with an alias or phonemes.
+                if j > 0 && j + 1 < n && tk.text == "2" {
+                    let left_ok = subs_snapshot
+                        .get(j - 1)
+                        .and_then(|t: &String| t.chars().last())
+                        .map(|c| c.is_alphabetic())
+                        .unwrap_or(false);
+                    let right_ok = subs_snapshot
+                        .get(j + 1)
+                        .and_then(|t: &String| t.chars().next())
+                        .map(|c| c.is_alphabetic())
+                        .unwrap_or(false);
+                    if left_ok && right_ok {
+                        tk.underscore_mut().alias = Some("to".to_string());
+                    }
+                }
+
                 let mut first_in_span = true;
                 for marker in &markers {
                     if start >= marker.byte_start && end <= marker.byte_end {
@@ -767,7 +798,15 @@ impl G2P {
             // us_gold as ɪts, "I'm" as ˌIm, "'s" as s -- so prose using curly
             // ’ missed every one of them and fell through to spelling the
             // pieces out. The token's own text keeps the original character.
-            let word = Self::normalize_lookup(&tokens[i].text);
+            // misaki looks up `tk._.alias` in place of the text when one is
+            // set (`word = tk.text if tk._.alias is None else tk._.alias`), and
+            // it happens HERE rather than in a pre-pass so the lookup sees the
+            // rolling context: `to` is tə before a consonant and tu before a
+            // vowel, and in `G2P` the `P` that follows is a consonant.
+            let word = match tokens[i].underscore().alias.clone() {
+                Some(a) => a,
+                None => Self::normalize_lookup(&tokens[i].text),
+            };
             let tag = tokens[i].tag.clone();
             // An explicit `[word](+N)` marker takes precedence over
             // capitalization-derived stress, matching Python misaki which
