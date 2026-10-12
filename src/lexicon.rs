@@ -180,22 +180,24 @@ impl Lexicon {
             }
         }
 
-        if ps.is_none() && (word == "three" || word == "one") {
-            eprintln!(
-                "DEBUG: lookup '{}', dictionary size: {}, contains 'three': {}",
-                word,
-                self.golds.len(),
-                self.golds.contains_key("three")
-            );
-        }
-
-        // Special NNP handling if not found or no primary stress
-        if ps.is_none() || (is_nnp && !ps.as_ref()?.contains('ˈ')) {
-            if is_nnp {
-                if let Some((nnp_ps, nnp_rating)) = self.get_nnp(&current_word) {
-                    ps = Some(nnp_ps);
-                    rating = nnp_rating;
-                }
+        // misaki (`Lexicon.lookup`):
+        //
+        //     if ps is None or (is_NNP and PRIMARY_STRESS not in ps):
+        //         ps, rating = self.get_NNP(word)
+        //         if ps is not None:
+        //             return ps, rating
+        //     return apply_stress(ps, stress), rating
+        //
+        // Two differences from what was here. There was an extra `if is_nnp`
+        // guard around the get_NNP call, so a word that is in no lexicon could
+        // only be spelled out when its tag was literally NNP -- every plural
+        // acronym under its real tag of NNS resolved to nothing, and "PDFs",
+        // "CEOs", "CDs", "DVDs", "GPUs", "CPUs" and "APIs" all came out silent.
+        // And misaki RETURNS get_NNP's result as-is; applying `stress` to it
+        // afterwards is not what it does.
+        if ps.is_none() || (is_nnp && !ps.as_deref().is_some_and(|p| p.contains('ˈ'))) {
+            if let Some((nnp_ps, nnp_rating)) = self.get_nnp(&current_word) {
+                return Some((nnp_ps, nnp_rating));
             }
         }
 
