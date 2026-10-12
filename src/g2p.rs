@@ -778,10 +778,77 @@ impl G2P {
                     } else {
                         Some(self.lexicon.cap_stresses.0)
                     };
-                    let whole = self
-                        .lexicon
-                        .get_word(&key, &tag, merged_stress, Some(&contexts[g.start]))
-                        .map(|(ps, _)| ps);
+                    // misaki's multi-token loop (`G2P.__call__`). It does not
+                    // pick one span -- it resolves the word in PIECES, right to
+                    // left, and the result is their concatenation:
+                    //
+                    //     left, right = 0, len(w)
+                    //     while left < right:
+                    //         tk = merge_tokens(w[left:right])      # if none resolved yet
+                    //         ps, rating = self.lexicon(tk, ctx)
+                    //         if ps is not None:
+                    //             w[left].phonemes = ps
+                    //             for x in w[left+1:right]: x.phonemes = ''
+                    //             right = left; left = 0
+                    //         elif left + 1 < right: left += 1
+                    //         else:
+                    //             right -= 1
+                    //             if all(c in SUBTOKEN_JUNKS for c in w[right].text):
+                    //                 w[right].phonemes = ''
+                    //             left = 0
+                    //
+                    // `Austen’s` needs this: "Austen's" misses, then the span
+                    // "'s" HITS (us_gold holds "'s" as s), and Austen stays
+                    // unresolved -- giving misaki's `s`. Trying only the whole
+                    // word stitched on the letter name ˈɛs instead.
+                    let n = g.len();
+                    let mut res: Vec<Option<String>> = vec![None; n];
+                    let mut left = 0usize;
+                    let mut right = n;
+                    while left < right {
+                        // misaki only merges a span none of whose members has
+                        // resolved yet.
+                        let free = res[left..right].iter().all(|r| r.is_none());
+                        let hit = if free {
+                            let sub = &tokens[g.start + left..g.start + right];
+                            let (t, tg, _) = Self::merge_text_tag(sub);
+                            let k = Self::normalize_lookup(&t);
+                            let st = if k == k.to_lowercase() {
+                                None
+                            } else if k == k.to_uppercase() {
+                                Some(self.lexicon.cap_stresses.1)
+                            } else {
+                                Some(self.lexicon.cap_stresses.0)
+                            };
+                            self.lexicon
+                                .get_word(&k, &tg, st, Some(&contexts[g.start]))
+                                .map(|(ps, _)| ps)
+                        } else {
+                            None
+                        };
+                        if let Some(ps) = hit {
+                            res[left] = Some(ps);
+                            for k in left + 1..right {
+                                res[k] = Some(String::new());
+                            }
+                            right = left;
+                            left = 0;
+                        } else if left + 1 < right {
+                            left += 1;
+                        } else {
+                            right -= 1;
+                            if res[right].is_none() {
+                                let t = &tokens[g.start + right].text;
+                                if !t.is_empty() && t.chars().all(|c| SUBTOKEN_JUNKS.contains(c)) {
+                                    res[right] = Some(String::new());
+                                }
+                            }
+                            left = 0;
+                        }
+                    }
+                    // Anything still unresolved stays unresolved, as misaki
+                    // leaves it: merge_tokens substitutes `unk` for None.
+                    let whole: Option<String> = None;
 
                     let phonemes = whole.or_else(|| {
                         // misaki's `resolve_tokens` rebalances stress across the
@@ -803,8 +870,18 @@ impl G2P {
                         // `stress_weight` counts diphthongs double, which is what
                         // decides WHICH part is demoted: ɹˈAs weighs 5 (A is a
                         // diphthong) against kˈɔkəs's 6, so Race loses its primary.
-                        let mut parts: Vec<String> =
-                            group.iter().map(|tk| part_of(tk)).collect();
+                        let mut parts: Vec<String> = res
+                            .iter()
+                            .enumerate()
+                            .map(|(i, r)| match r {
+                                Some(ps) => ps.clone(),
+                                // Unresolved: misaki writes `unk`, which our
+                                // pipeline sets to the empty string. Fall back to
+                                // whatever the per-token pass found only for a
+                                // token the span loop never reached.
+                                None => part_of(&group[i]),
+                            })
+                            .collect();
                         // `resolve_tokens` RETURNS before rebalancing when the
                         // parts are space-separated:
                         //
