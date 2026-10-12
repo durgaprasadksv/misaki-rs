@@ -223,16 +223,38 @@ impl G2P {
                 self.subtoken_regex.find_iter(word).collect();
 
             if subtokens.is_empty() {
-                let tk = MToken::new(word.to_string(), "NN".to_string(), " ".to_string());
+                let tk = MToken::new(word.to_string(), "NN".to_string(), String::new());
                 tokens.push((tk, word_start..mat.end()));
             } else {
                 for sub in subtokens {
                     let s = word_start + sub.start();
                     let e = word_start + sub.end();
                     let tk =
-                        MToken::new(sub.as_str().to_string(), "NN".to_string(), " ".to_string());
+                        MToken::new(sub.as_str().to_string(), "NN".to_string(), String::new());
                     tokens.push((tk, s..e));
                 }
+            }
+        }
+
+        // Fill in each token's trailing whitespace from the SOURCE TEXT.
+        //
+        // misaki carries spaCy's `token.whitespace_`, i.e. the actual
+        // characters between this token and the next -- empty when the next
+        // token is adjacent. The assembled phoneme string is
+        // `''.join(phonemes + whitespace)` (`en.py:711`), so hardcoding " "
+        // here produced "b\u02c8\u0251\u0279kt . " where misaki gives
+        // "b\u02c8\u0251\u0279kt.", and no phoneme string could ever match.
+        // Byte ranges from the regex are always char boundaries, so slicing is
+        // safe.
+        for i in 0..tokens.len() {
+            let gap_start = tokens[i].1.end;
+            let gap_end = if i + 1 < tokens.len() {
+                tokens[i + 1].1.start
+            } else {
+                text.len()
+            };
+            if gap_start < gap_end {
+                tokens[i].0.whitespace = text[gap_start..gap_end].to_string();
             }
         }
 
@@ -458,6 +480,26 @@ impl G2P {
                         contexts[i - 1].future_vowel = Some(false);
                         break;
                     }
+                }
+            }
+        }
+
+        // misaki applies exactly this, after all resolution and merging and
+        // before assembling the string (`en.py:708-710`, gated on
+        // `version != '2.0'`):
+        //
+        //     tk.phonemes = tk.phonemes.replace('\u027e', 'T').replace('\u0294', 't')
+        //
+        // The lexicons store \u027e and \u0294; Kokoro's vocab wants T and t. It runs
+        // AFTER resolution on purpose -- the context pass matches \u027e against its
+        // consonant set, so replacing earlier would break that -- and it is
+        // applied to the TOKENS, not just the assembled string, because
+        // `pred_dur` has one entry per token and the word timestamps are
+        // derived from the per-token phonemes.
+        for tk in tokens.iter_mut() {
+            if let Some(ps) = tk.phonemes.as_mut() {
+                if !ps.is_empty() {
+                    *ps = ps.replace('\u{27e}', "T").replace('\u{294}', "t");
                 }
             }
         }
