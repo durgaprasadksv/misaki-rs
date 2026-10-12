@@ -4,6 +4,8 @@ pub mod languages;
 pub mod lexicon;
 pub mod abbrev;
 pub mod data;
+pub mod symbols;
+pub mod spacy_tagger;
 pub mod tagger;
 pub mod g2p;
 pub mod fallback;
