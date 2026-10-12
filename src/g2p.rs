@@ -92,6 +92,10 @@ pub struct G2P {
     pub unk: String,
     subtoken_regex: Regex,
     link_regex: Regex,
+    /// The perceptron tagger this crate shipped with. No longer used for
+    /// pronunciation -- `spacy_tagger` is, because misaki's output depends on
+    /// spaCy's exact tags -- but kept so the two remain comparable.
+    #[allow(dead_code)]
     tagger: PerceptronTagger,
     spacy_tagger: crate::spacy_tagger::Tagger,
     rules: Box<dyn LanguageRules>,
@@ -1554,10 +1558,19 @@ mod tests {
         // em-dash — (U+2014) and hyphen -
         let (dash, _) = g2p.g2p("word - word — word").unwrap();
         println!("Dash: {}", dash);
-        assert!(
-            !dash.contains("❓"),
-            "Dashes should be handled gracefully, got: {}",
-            dash
+        // misaki 0.9.4 gives exactly this, verified against the oracle:
+        //
+        //     "word - word — word" -> wˈɜɹd ❓ wˈɜɹd — wˈɜɹd
+        //
+        // The two dashes are NOT alike. spaCy tags the em-dash `:`, which puts
+        // it in PUNCT_TAGS and renders it —; it tags the plain hyphen HYPH,
+        // which is not punctuation, so the lexicon misses it and it comes back
+        // unresolved and prints as `unk`. This assertion used to forbid `unk`
+        // altogether, which was the pre-fork behaviour.
+        assert!(dash.contains('—'), "em-dash dropped: {dash}");
+        assert_eq!(
+            dash, "wˈɜɹd ❓ wˈɜɹd — wˈɜɹd",
+            "does not match misaki 0.9.4"
         );
     }
 
