@@ -800,7 +800,21 @@ impl G2P {
                 }
 
                 if tokens[i].phonemes.is_none() {
-                    if word.contains('-') && word.len() > 1 {
+                    // The number path comes FIRST. misaki has no
+                    // hyphen-splitting branch at all -- it is an invention of
+                    // this port -- and letting it win meant a signed number was
+                    // split on its own sign: `-40` became "" + "forty" and the
+                    // minus was simply lost, where misaki says mˈInəs fˈɔɹTi.
+                    if self.is_number_like(&word) && word.starts_with('-') {
+                        let spoken = self.convert_number(&word);
+                        if spoken != word {
+                            if let Some(p) = self.number_phonemes(&spoken) {
+                                tokens[i].phonemes = Some(p);
+                            } else if let Ok((p, _)) = self.g2p(&spoken) {
+                                tokens[i].phonemes = Some(p.trim_end().to_string());
+                            }
+                        }
+                    } else if word.contains('-') && word.len() > 1 {
                         // Handle hyphenated words like "twenty-one"
                         let parts: Vec<&str> = word.split('-').filter(|s| !s.is_empty()).collect();
                         let mut sub_ps = Vec::new();
