@@ -670,6 +670,44 @@ impl G2P {
             tk.tag = tag.clone();
         }
 
+        // misaki's currency state machine (`retokenize`):
+        //
+        //     elif tk.tag == '$' and tk.text in CURRENCIES:
+        //         currency = tk.text; tk.phonemes = ''; tk._.rating = 4
+        //     ...
+        //     elif j+1 == len(tks) and (i+1 == len(tokens) or tokens[i+1].tag != 'CD'):
+        //         tk._.currency = currency
+        //
+        // The symbol becomes its own silent token and the unit is spoken by the
+        // number after it: `$9` is [('$', ''), ('9', 'nˈIn dˈɑləɹz')]. Measured,
+        // it reaches only the IMMEDIATELY following number -- `$9 and 5 more`
+        // leaves the 5 bare.
+        //
+        // This has to be a separate pass because spaCy tokenizes the symbol
+        // away from the digits, so the two are never in one group.
+        let mut currency_of: Vec<Option<char>> = vec![None; tokens.len()];
+        {
+            let mut pending: Option<char> = None;
+            for i in 0..tokens.len() {
+                let c1 = {
+                    let t = &tokens[i].text;
+                    if t.chars().count() == 1 { t.chars().next() } else { None }
+                };
+                if tokens[i].tag == "$" {
+                    if let Some(c) = c1 {
+                        if matches!(c, '$' | '\u{a3}' | '\u{20ac}') {
+                            pending = Some(c);
+                            tokens[i].phonemes = Some(String::new());
+                            continue;
+                        }
+                    }
+                }
+                if let Some(c) = pending.take() {
+                    currency_of[i] = Some(c);
+                }
+            }
+        }
+
         // misaki assigns punctuation its phonemes in `retokenize`, i.e. BEFORE
         // any lexicon lookup, and the resolution loop then skips those tokens
         // because `tk.phonemes is not None`. Order matters: our lookup
@@ -744,6 +782,20 @@ impl G2P {
                             sub_ps.push(p);
                         }
                         tokens[i].phonemes = Some(sub_ps.join(" "));
+                    } else if let Some(spoken) = currency_of[i]
+                        .filter(|_| {
+                            let c = word.replace(',', "");
+                            !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+                        })
+                        .and_then(|sym| self.currency_words(sym, &word))
+                    {
+                        // A number carrying a currency from the symbol before
+                        // it. This is handled here as well as in the merge pass
+                        // because spaCy puts the symbol in its own token, so a
+                        // bare `$9` never forms a multi-token group at all.
+                        if let Ok((p, _)) = self.g2p(&spoken) {
+                            tokens[i].phonemes = Some(p.trim_end().to_string());
+                        }
                     } else if self.is_number_like(&word) {
                         let spoken = self.convert_number(&word);
                         if spoken != word {
@@ -967,24 +1019,18 @@ impl G2P {
                     //   $0.50     -> fifty cents        (the zero major is dropped)
                     //   $1,250.75 -> one thousand two hundred fifty dollars
                     //                and seventy five cents
-                    if let Some(spoken) = self.currency_words(&text) {
+                    if let Some(spoken) = currency_of[g.start]
+                        .filter(|_| {
+                            let c = text.replace(',', "");
+                            !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+                        })
+                        .and_then(|sym| self.currency_words(sym, &text))
+                    {
                         if let Ok((p, _)) = self.g2p(&spoken) {
-                            // misaki keeps the SYMBOL as its own token with
-                            // empty phonemes and hangs the words off the number:
-                            // `$9` is [('$', ''), ('9', 'nˈIn dˈɑləɹz')]. Emitting
-                            // one merged token instead gave the right audio with
-                            // the wrong word boundaries.
-                            let mut sym = group[0].clone();
-                            let mut it = text.chars();
-                            let s0 = it.next().unwrap();
-                            sym.text = s0.to_string();
-                            sym.tag = "$".to_string();
-                            sym.whitespace = String::new();
-                            sym.phonemes = Some(String::new());
-                            merged.push(sym);
-
+                            // The symbol is already its own token, silenced by
+                            // the pass above, so only the number is emitted here.
                             let mut tk = group[0].clone();
-                            tk.text = it.collect();
+                            tk.text = text;
                             tk.tag = tag;
                             tk.whitespace = ws;
                             tk.phonemes = Some(p.trim_end().to_string());
@@ -1259,16 +1305,14 @@ impl G2P {
     ///
     /// See the call site for misaki's rules; the units come from its CURRENCIES
     /// table.
-    fn currency_words(&self, word: &str) -> Option<String> {
-        let mut cs = word.chars();
-        let sym = cs.next()?;
+    fn currency_words(&self, sym: char, amount: &str) -> Option<String> {
         let units: (&str, &str) = match sym {
             '$' => ("dollar", "cent"),
             '\u{a3}' => ("pound", "pence"),
             '\u{20ac}' => ("euro", "cent"),
             _ => return None,
         };
-        let rest: String = cs.collect::<String>().replace(',', "");
+        let rest: String = amount.replace(',', "");
         if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit() || c == '.') {
             return None;
         }
