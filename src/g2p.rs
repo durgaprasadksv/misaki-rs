@@ -270,7 +270,7 @@ impl G2P {
         // identical -- 38 prose cases that agreed on what is said and disagreed
         // on which word says it.
         const STANDALONE: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}()[]{}*";
-        let is_standalone = |tk: &MToken| -> bool {
+        let is_standalone = |tk: &MToken, is_last: bool| -> bool {
             if tk.text.is_empty() {
                 return false;
             }
@@ -287,11 +287,13 @@ impl G2P {
                 return true;
             }
             // A CLOSING apostrophe is part of the word only when the word
-            // continues past it (`man’s`, `It’s`). With trailing whitespace it is
-            // a closing quote, tagged '' and rendered ”, which is why
-            // `Thomas’ books` stays two tokens.
+            // continues past it (`man’s`, `It’s`). Otherwise it is a closing
+            // quote, tagged '' and rendered ”, which is why `Thomas’ books` and
+            // `… little’` both stay two tokens. The `is_last` case matters:
+            // at the end of the input there is no trailing whitespace, and
+            // testing whitespace alone merged it into the previous word.
             if tk.text.chars().all(|c| c == '\u{2019}' || c == '\'')
-                && !tk.whitespace.is_empty()
+                && (!tk.whitespace.is_empty() || is_last)
             {
                 return true;
             }
@@ -301,7 +303,7 @@ impl G2P {
         let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
         let mut open = false; // is the last group still extensible?
         for i in 0..tokens.len() {
-            if is_standalone(&tokens[i]) {
+            if is_standalone(&tokens[i], i + 1 == tokens.len()) {
                 // ... unless joining it to the open group spells an
                 // abbreviation spaCy would never have split. Our tokenizer
                 // splits on the period unconditionally, so `Mr` + `.` must be
@@ -350,6 +352,28 @@ impl G2P {
     /// substitution is the part that changes lookups.
     fn normalize_lookup(text: &str) -> String {
         text.replace('\u{2018}', "'").replace('\u{2019}', "'")
+    }
+
+    /// misaki's punctuation phonemes (`en.py:598-599`): the PUNCT_TAG_PHONEMES
+    /// mapping, then keep only characters in PUNCTS.
+    ///
+    ///     tk.phonemes = PUNCT_TAG_PHONEMES.get(
+    ///         tk.tag, ''.join(c for c in tk.text if c in PUNCTS))
+    ///
+    /// with PUNCTS = ';:,.!?\u2014\u2026"\u201c\u201d' and `` -> \u201c, '' -> \u201d, -LRB- -> (,
+    /// -RRB- -> ). An empty result is correct for a symbol in no class (`*`).
+    fn punct_phonemes(text: &str) -> String {
+        const PUNCTS: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}";
+        text.chars()
+            .map(|c| match c {
+                '\u{2018}' | '`' => '\u{201c}',
+                '\u{2019}' | '\'' => '\u{201d}',
+                '[' | '{' => '(',
+                ']' | '}' => ')',
+                other => other,
+            })
+            .filter(|c| PUNCTS.contains(*c) || matches!(c, '(' | ')'))
+            .collect()
     }
 
     /// Port of misaki's `G2P.token_context` (`en.py`).
@@ -514,7 +538,14 @@ impl G2P {
             .map(|g| {
                 let sub = &tokens[g.clone()];
                 let (t, _, ws) = Self::merge_text_tag(sub);
-                (t.clone(), t.to_lowercase(), !ws.is_empty())
+                // spaCy tokenizes `_` as its own NFP token, so it tags the WORD
+                // inside: `_I_` is `_`,`I`,`_` and `merge_tokens` then takes the
+                // heaviest member's tag, PRP. Our group is the whole `_I_`, so
+                // strip the emphasis underscores before tagging or the model
+                // sees a token it never met and answers NNP.
+                let probe = t.trim_matches('_');
+                let probe = if probe.is_empty() { t.as_str() } else { probe };
+                (probe.to_string(), probe.to_lowercase(), !ws.is_empty())
             })
             .collect();
         let group_tags = self.spacy_tagger.tag(&tagger_input);
@@ -543,6 +574,38 @@ impl G2P {
         // First, set tags
         for (tk, tag) in tokens.iter_mut().zip(tags.iter()) {
             tk.tag = tag.clone();
+        }
+
+        // misaki assigns punctuation its phonemes in `retokenize`, i.e. BEFORE
+        // any lexicon lookup, and the resolution loop then skips those tokens
+        // because `tk.phonemes is not None`. Order matters: our lookup
+        // normalises ‘ to a straight quote, which the lexicon then resolves to
+        // ” -- so reaching the lexicon at all gave ‘ the CLOSING quote where
+        // misaki gives the opening one.
+        //
+        // The test is on the characters rather than the tag, as in
+        // `group_by_adjacency`; `_` is excluded because misaki merges it into
+        // the neighbouring word.
+        {
+            const STANDALONE: &str = ";:,.!?\u{2014}\u{2026}\"\u{201c}\u{201d}()[]{}*";
+            for i in 0..tokens.len() {
+                if tokens[i].phonemes.is_some() || tokens[i].text.is_empty() {
+                    continue;
+                }
+                let t = &tokens[i].text;
+                let is_quote = t.chars().all(|c| c == '\u{2018}' || c == '`');
+                let is_close = t.chars().all(|c| c == '\u{2019}' || c == '\'')
+                    && (!tokens[i].whitespace.is_empty() || i + 1 == tokens.len());
+                let is_dash = t.chars().count() >= 2
+                    && t.chars().all(|c| c == '-' || c == '\u{2013}');
+                if is_quote
+                    || is_close
+                    || is_dash
+                    || t.chars().all(|c| STANDALONE.contains(c))
+                {
+                    tokens[i].phonemes = Some(Self::punct_phonemes(t));
+                }
+            }
         }
 
         // Process in reverse to build context from future tokens
