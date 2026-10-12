@@ -104,15 +104,36 @@ pub struct G2P {
 
 impl G2P {
     pub fn new(lang: Language) -> Self {
-        // Regex for subtokenization with better UTF-8 support using Unicode properties
+        // misaki's SUBTOKEN_REGEX (`en.py:55`), alternative for alternative and
+        // in the same order, since regex alternation takes the first match:
+        //
+        //   ^['‘’]+ | \p{Lu}(?=\p{Lu}\p{Ll}) | (?:^-)?(?:\d?[,.]?\d)+ | [-_]+
+        //   | ['‘’]{2,} | \p{L}*?(?:['‘’]\p{L})*?\p{Ll}(?=\p{Lu})
+        //   | \p{L}+(?:['‘’]\p{L})* | [^-_\p{L}'‘’\d] | ['‘’]+$
+        //
+        // Two bugs were in the character classes here. The word-internal
+        // apostrophe class read `[''']` -- three copies of the STRAIGHT
+        // apostrophe where misaki has straight plus both curly -- and the
+        // catch-all excluded only the straight one. So a curly ’ fell through
+        // to the catch-all and became its own token: `man’s` split into
+        // `man`,`’`,`s` while `man's` stayed whole. Every curly possessive and
+        // contraction in real prose came apart -- `man’s`, `Alice’s`,
+        // `hadn’t`, `won’t`, `Raskolnikov’s`.
+        //
+        // The repeat is `\p{L}` and not `\p{L}+`, also as misaki has it; that is
+        // what makes `o’clock` subtokenize as `o’c` + `lock`.
+        //
+        // The two alternatives with lookahead (`\p{Lu}(?=\p{Lu}\p{Ll})` and the
+        // camel-case split) need `fancy_regex`; they are handled separately
+        // below so this stays on the fast `regex` engine.
         let subtoken_regex = Regex::new(
             r"(?x)
             ^['‘’]+ |
             (?:^-)?(?:\d?[,.]?\d)+ |
             [\-_]+ |
             ['‘’]{2,} |
-            \p{L}+(?:[''']\p{L}+)* |
-            [^\s\-_0-9\p{L}''] |
+            \p{L}+(?:['‘’]\p{L})* |
+            [^\-_\p{L}'‘’\d] |
             ['‘’]+$
         ",
         )
