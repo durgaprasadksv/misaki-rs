@@ -750,20 +750,81 @@ impl G2P {
 
                     // misaki tries the whole word in the lexicon first and only
                     // falls back to stitching the parts together.
+                    // misaki derives stress from CAPITALISATION before the
+                    // lookup (`Lexicon.__call__`):
+                    //
+                    //     stress = None if word == word.lower() \
+                    //              else self.cap_stresses[int(word == word.upper())]
+                    //
+                    // Passing None here cost the leading stress on every
+                    // capitalised contraction: `It’s` resolved to ɪts where misaki
+                    // gives ˌɪts.
+                    let key = Self::normalize_lookup(&text);
+                    let merged_stress = if key == key.to_lowercase() {
+                        None
+                    } else if key == key.to_uppercase() {
+                        Some(self.lexicon.cap_stresses.1)
+                    } else {
+                        Some(self.lexicon.cap_stresses.0)
+                    };
                     let whole = self
                         .lexicon
-                        .get_word(
-                            &Self::normalize_lookup(&text),
-                            &tag,
-                            None,
-                            Some(&contexts[g.start]),
-                        )
+                        .get_word(&key, &tag, merged_stress, Some(&contexts[g.start]))
                         .map(|(ps, _)| ps);
 
                     let phonemes = whole.or_else(|| {
+                        // misaki's `resolve_tokens` rebalances stress across the
+                        // parts of one word before they are joined:
+                        //
+                        //     indices = [(PRIMARY_STRESS in tk.phonemes,
+                        //                 stress_weight(tk.phonemes), i) ...]
+                        //     if len(indices) == 2 and len(tokens[indices[0][2]].text) == 1:
+                        //         demote indices[1]
+                        //     elif len(indices) < 2 or sum(b for b,_,_ in indices) <= (len(indices)+1)//2:
+                        //         return
+                        //     for _,_,i in sorted(indices)[:len(indices)//2]: demote i
+                        //
+                        // where demote is `apply_stress(ps, -0.5)` -- primary
+                        // becomes secondary. Without it a compound kept a primary
+                        // stress on every part: `Caucus-Race` came out
+                        // kˈɔkəsɹˈAs where misaki gives kˈɔkəsɹˌAs.
+                        //
+                        // `stress_weight` counts diphthongs double, which is what
+                        // decides WHICH part is demoted: ɹˈAs weighs 5 (A is a
+                        // diphthong) against kˈɔkəs's 6, so Race loses its primary.
+                        let mut parts: Vec<String> =
+                            group.iter().map(|tk| part_of(tk)).collect();
+                        {
+                            const PRIMARY: char = '\u{2c8}';
+                            const DIPHTHONGS: &str = "AIOQWY\u{2a4}\u{2a7}";
+                            let weight = |ps: &str| -> usize {
+                                ps.chars()
+                                    .map(|c| if DIPHTHONGS.contains(c) { 2 } else { 1 })
+                                    .sum()
+                            };
+                            let mut idx: Vec<(bool, usize, usize)> = parts
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, p)| !p.is_empty())
+                                .map(|(i, p)| (p.contains(PRIMARY), weight(p), i))
+                                .collect();
+                            let n_primary = idx.iter().filter(|(b, _, _)| *b).count();
+                            if idx.len() == 2
+                                && group[idx[0].2].text.chars().count() == 1
+                            {
+                                let i = idx[1].2;
+                                parts[i] = self.lexicon.apply_stress(&parts[i], Some(-0.5));
+                            } else if idx.len() >= 2 && n_primary > (idx.len() + 1) / 2 {
+                                idx.sort();
+                                let half = idx.len() / 2;
+                                for (_, _, i) in idx.into_iter().take(half) {
+                                    parts[i] = self.lexicon.apply_stress(&parts[i], Some(-0.5));
+                                }
+                            }
+                        }
+
                         let mut out = String::new();
-                        for tk in group {
-                            let part = part_of(tk);
+                        for part in parts {
                             if prespace
                                 && !out.is_empty()
                                 && !out.ends_with(char::is_whitespace)
